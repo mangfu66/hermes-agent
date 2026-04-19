@@ -2071,14 +2071,14 @@ def validate_requested_model(
             "message": message,
         }
 
-    # OpenAI Codex has its own catalog path; /v1/models probing is not the right validation path.
-    if normalized == "openai-codex":
+    # OpenAI Codex and Gemini CLI OAuth have their own catalog path; /v1/models probing is not the right validation path.
+    if normalized in {"openai-codex", "google-gemini-cli"}:
         try:
-            codex_models = provider_model_ids("openai-codex")
+            provider_models = provider_model_ids(normalized)
         except Exception:
-            codex_models = []
-        if codex_models:
-            if requested_for_lookup in set(codex_models):
+            provider_models = []
+        if provider_models:
+            if requested_for_lookup in set(provider_models):
                 return {
                     "accepted": True,
                     "persist": True,
@@ -2086,7 +2086,7 @@ def validate_requested_model(
                     "message": None,
                 }
             # Auto-correct if the top match is very similar (e.g. typo)
-            auto = get_close_matches(requested_for_lookup, codex_models, n=1, cutoff=0.9)
+            auto = get_close_matches(requested_for_lookup, provider_models, n=1, cutoff=0.9)
             if auto:
                 return {
                     "accepted": True,
@@ -2095,16 +2095,17 @@ def validate_requested_model(
                     "corrected_model": auto[0],
                     "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
                 }
-            suggestions = get_close_matches(requested_for_lookup, codex_models, n=3, cutoff=0.5)
+            suggestions = get_close_matches(requested_for_lookup, provider_models, n=3, cutoff=0.5)
             suggestion_text = ""
             if suggestions:
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
+            provider_label = "OpenAI Codex" if normalized == "openai-codex" else "Google Gemini CLI OAuth"
             return {
                 "accepted": False,
                 "persist": False,
                 "recognized": False,
                 "message": (
-                    f"Model `{requested}` was not found in the OpenAI Codex model listing."
+                    f"Model `{requested}` was not found in the {provider_label} model listing."
                     f"{suggestion_text}"
                 ),
             }
