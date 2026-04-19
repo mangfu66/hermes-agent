@@ -392,6 +392,41 @@ def _resolve_model() -> str:
     return "anthropic/claude-sonnet-4"
 
 
+def _resolve_runtime() -> dict:
+    """Resolve the effective runtime so TUI matches classic CLI routing."""
+    model = _resolve_model()
+    runtime = {
+        "model": model,
+        "provider": "",
+        "base_url": "",
+        "api_key": "",
+        "api_mode": "",
+        "acp_command": None,
+        "acp_args": [],
+        "credential_pool": None,
+    }
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        resolved = resolve_runtime_provider(requested=None)
+        runtime_model = resolved.get("model")
+        if isinstance(runtime_model, str) and runtime_model:
+            model = runtime_model
+        runtime.update({
+            "model": model,
+            "provider": str(resolved.get("provider", "") or ""),
+            "base_url": str(resolved.get("base_url", "") or ""),
+            "api_key": str(resolved.get("api_key", "") or ""),
+            "api_mode": str(resolved.get("api_mode", "") or ""),
+            "acp_command": resolved.get("command"),
+            "acp_args": list(resolved.get("args") or []),
+            "credential_pool": resolved.get("credential_pool"),
+        })
+    except Exception:
+        pass
+    return runtime
+
+
 def _write_config_key(key_path: str, value):
     cfg = _load_cfg()
     current = cfg
@@ -962,11 +997,19 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
 def _make_agent(sid: str, key: str, session_id: str | None = None):
     from run_agent import AIAgent
     cfg = _load_cfg()
+    runtime = _resolve_runtime()
     system_prompt = cfg.get("agent", {}).get("system_prompt", "") or ""
     if not system_prompt:
         system_prompt = _resolve_personality_prompt(cfg)
     return AIAgent(
-        model=_resolve_model(),
+        model=runtime.get("model") or _resolve_model(),
+        api_key=runtime.get("api_key"),
+        base_url=runtime.get("base_url"),
+        provider=runtime.get("provider"),
+        api_mode=runtime.get("api_mode") or None,
+        acp_command=runtime.get("acp_command"),
+        acp_args=runtime.get("acp_args"),
+        credential_pool=runtime.get("credential_pool"),
         quiet_mode=True,
         verbose_logging=_load_tool_progress_mode() == "verbose",
         reasoning_config=_load_reasoning_config(),
@@ -1757,8 +1800,21 @@ def _(rid, params: dict) -> dict:
         session_tokens = _set_session_context(session["session_key"])
         try:
             from run_agent import AIAgent
-            result = AIAgent(model=_resolve_model(), quiet_mode=True, platform="tui",
-                             max_iterations=8, enabled_toolsets=[]).run_conversation(text, conversation_history=snapshot)
+            runtime = _resolve_runtime()
+            result = AIAgent(
+                model=runtime.get("model") or _resolve_model(),
+                api_key=runtime.get("api_key"),
+                base_url=runtime.get("base_url"),
+                provider=runtime.get("provider"),
+                api_mode=runtime.get("api_mode") or None,
+                acp_command=runtime.get("acp_command"),
+                acp_args=runtime.get("acp_args"),
+                credential_pool=runtime.get("credential_pool"),
+                quiet_mode=True,
+                platform="tui",
+                max_iterations=8,
+                enabled_toolsets=[],
+            ).run_conversation(text, conversation_history=snapshot)
             _emit("btw.complete", sid, {"text": result.get("final_response", str(result)) if isinstance(result, dict) else str(result)})
         except Exception as e:
             _emit("btw.complete", sid, {"text": f"error: {e}"})
@@ -2504,8 +2560,9 @@ def _(rid, params: dict) -> dict:
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
         cfg = _load_cfg()
-        current_provider = getattr(agent, "provider", "") or ""
-        current_model = getattr(agent, "model", "") or _resolve_model()
+        runtime = _resolve_runtime()
+        current_provider = getattr(agent, "provider", "") or runtime.get("provider", "")
+        current_model = getattr(agent, "model", "") or runtime.get("model") or _resolve_model()
         providers = list_authenticated_providers(
             current_provider=current_provider,
             user_providers=cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {},
