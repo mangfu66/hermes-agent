@@ -2987,6 +2987,8 @@ def login_command(args) -> None:
             DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
             default_model=default_model,
         )
+        if default_model:
+            _save_model_choice(default_model)
         print()
         print("Login successful!")
         from hermes_constants import display_hermes_home as _dhh
