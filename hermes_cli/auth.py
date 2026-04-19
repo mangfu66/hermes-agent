@@ -896,6 +896,12 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
             del pool[target]
             cleared = True
 
+        if target == "google-gemini-cli":
+            google_oauth_path = get_hermes_home() / "auth" / "google_oauth.json"
+            if google_oauth_path.exists():
+                google_oauth_path.unlink()
+                cleared = True
+
         if not cleared:
             return False
         if auth_store.get("active_provider") == target:
@@ -2948,11 +2954,53 @@ def _save_model_choice(model_id: str) -> None:
 
 
 def login_command(args) -> None:
-    """Deprecated: use 'hermes model' or 'hermes setup' instead."""
-    print("The 'hermes login' command has been removed.")
-    print("Use 'hermes auth' to manage credentials,")
-    print("'hermes model' to select a provider, or 'hermes setup' for full setup.")
-    raise SystemExit(0)
+    """Authenticate Hermes CLI with a provider and wire it into the active runtime."""
+    provider_id = getattr(args, "provider", None) or "nous"
+    pconfig = PROVIDER_REGISTRY.get(provider_id)
+    if not pconfig:
+        print(f"Unknown provider: {provider_id}")
+        raise SystemExit(1)
+
+    if provider_id == "openai-codex":
+        _login_openai_codex(args, pconfig)
+        return
+
+    if provider_id == "nous":
+        _login_nous(args, pconfig)
+        return
+
+    if provider_id == "google-gemini-cli":
+        from agent.google_oauth import run_gemini_oauth_login_pure
+        from hermes_cli.models import _PROVIDER_MODELS
+
+        print()
+        print("Signing in to Google Gemini OAuth / Code Assist...")
+        print("This opens a browser login and stores credentials in ~/.hermes/auth/google_oauth.json")
+        print()
+        creds = run_gemini_oauth_login_pure()
+        default_model = None
+        google_models = list(_PROVIDER_MODELS.get("google-gemini-cli") or [])
+        if google_models:
+            default_model = google_models[0]
+        config_path = _update_config_for_provider(
+            "google-gemini-cli",
+            DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
+            default_model=default_model,
+        )
+        print()
+        print("Login successful!")
+        from hermes_constants import display_hermes_home as _dhh
+        print(f"  Auth state: {_dhh()}/auth/google_oauth.json")
+        if creds.get("project_id"):
+            print(f"  Project: {creds['project_id']}")
+        if creds.get("email"):
+            print(f"  Account: {creds['email']}")
+        print(f"  Config updated: {config_path} (model.provider=google-gemini-cli)")
+        return
+
+    print(f"Login for provider '{provider_id}' is not implemented yet.")
+    raise SystemExit(1)
+
 
 
 def _login_openai_codex(args, pconfig: ProviderConfig) -> None:
