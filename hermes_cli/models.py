@@ -1989,6 +1989,10 @@ def validate_requested_model(
     if normalized == "openrouter" and base_url and "openrouter.ai" not in base_url:
         normalized = "custom"
     requested_for_lookup = requested
+    if normalized == "openai-codex" and requested_for_lookup.startswith("gemini-"):
+        normalized = "google-gemini-cli"
+        provider = "google-gemini-cli"
+        base_url = "cloudcode-pa://google"
     if normalized == "copilot":
         requested_for_lookup = normalize_copilot_model_id(
             requested,
