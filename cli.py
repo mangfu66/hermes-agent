@@ -1571,11 +1571,28 @@ _skill_commands = scan_skill_commands()
 
 def _get_plugin_cmd_handler_names() -> set:
     """Return plugin command names (without slash prefix) for dispatch matching."""
+    names = set()
     try:
         from hermes_cli.plugins import get_plugin_manager
-        return set(get_plugin_manager()._plugin_commands.keys())
+        names |= set(get_plugin_manager()._plugin_commands.keys())
     except Exception:
-        return set()
+        pass
+    try:
+        from plugins.context_engine import get_context_engine_command_names, load_context_engine
+        names |= set(get_context_engine_command_names())
+        if not names:
+            try:
+                from hermes_cli.config import load_config as _load_config
+                _cfg = _load_config() or {}
+                _engine_name = ((_cfg.get('context') or {}).get('engine') or '').strip()
+                if _engine_name:
+                    load_context_engine(_engine_name)
+                    names |= set(get_context_engine_command_names())
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return names
 
 
 def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> list[str]:
@@ -5843,8 +5860,18 @@ class HermesCLI:
                     self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
             # Check for plugin-registered slash commands
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
-                from hermes_cli.plugins import get_plugin_command_handler
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+                plugin_handler = None
+                try:
+                    from hermes_cli.plugins import get_plugin_command_handler
+                    plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
+                except Exception:
+                    plugin_handler = None
+                if not plugin_handler:
+                    try:
+                        from plugins.context_engine import get_context_engine_command_handler
+                        plugin_handler = get_context_engine_command_handler(base_cmd.lstrip("/"))
+                    except Exception:
+                        plugin_handler = None
                 if plugin_handler:
                     user_args = cmd_original[len(base_cmd):].strip()
                     try:

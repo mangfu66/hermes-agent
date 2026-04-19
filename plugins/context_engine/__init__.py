@@ -23,11 +23,12 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _CONTEXT_ENGINE_PLUGINS_DIR = Path(__file__).parent
+_CONTEXT_ENGINE_COMMANDS = {}
 
 
 def discover_context_engines() -> List[Tuple[str, str, bool]]:
@@ -205,6 +206,15 @@ class _EngineCollector:
     def register_context_engine(self, engine):
         self.engine = engine
 
+    def register_command(self, name, handler, description=""):
+        clean = str(name or "").lower().strip().lstrip("/").replace(" ", "-")
+        if not clean:
+            return
+        _CONTEXT_ENGINE_COMMANDS[clean] = {
+            "handler": handler,
+            "description": description or "Context engine command",
+        }
+
     # No-op for other registration methods
     def register_tool(self, *args, **kwargs):
         pass
@@ -217,3 +227,15 @@ class _EngineCollector:
 
     def register_memory_provider(self, *args, **kwargs):
         pass
+
+
+def get_context_engine_command_handler(name: str):
+    """Return a context-engine slash-command handler if one was registered."""
+    clean = str(name or "").lower().strip().lstrip("/").replace("_", "-")
+    entry = _CONTEXT_ENGINE_COMMANDS.get(clean)
+    return entry.get("handler") if entry else None
+
+
+def get_context_engine_command_names():
+    """Return normalized slash command names provided by context engines."""
+    return set(_CONTEXT_ENGINE_COMMANDS.keys())

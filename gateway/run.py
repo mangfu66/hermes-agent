@@ -3547,6 +3547,18 @@ class GatewayRunner:
                     return str(result) if result else None
             except Exception as e:
                 logger.debug("Plugin command dispatch failed (non-fatal): %s", e)
+            try:
+                from plugins.context_engine import get_context_engine_command_handler
+                plugin_handler = get_context_engine_command_handler(command.replace("_", "-"))
+                if plugin_handler:
+                    user_args = event.get_command_args().strip()
+                    import asyncio as _aio
+                    result = plugin_handler(user_args)
+                    if _aio.iscoroutine(result):
+                        result = await result
+                    return str(result) if result else None
+            except Exception as e:
+                logger.debug("Context-engine command dispatch failed (non-fatal): %s", e)
 
         # Skill slash commands: /skill-name loads the skill and sends to agent.
         # resolve_skill_command_key() handles the Telegram underscore/hyphen
