@@ -46,8 +46,7 @@ from agent.google_code_assist import (
     CodeAssistError,
     ProjectContext,
     resolve_project_context,
-    _GEMINI_CLI_USER_AGENT,
-    _X_GOOG_API_CLIENT,
+    build_gemini_cli_user_agent,
 )
 
 logger = logging.getLogger(__name__)
@@ -713,9 +712,7 @@ class GeminiCloudCodeClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Authorization": f"Bearer {access_token}",
-            "User-Agent": _GEMINI_CLI_USER_AGENT,
-            "X-Goog-Api-Client": _X_GOOG_API_CLIENT,
-            "x-activity-request-id": str(uuid.uuid4()),
+            "User-Agent": build_gemini_cli_user_agent(model),
         }
         headers.update(self._default_headers)
 

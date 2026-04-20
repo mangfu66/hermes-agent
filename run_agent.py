@@ -1217,9 +1217,11 @@ class AIAgent:
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
                 if _provider_timeout is not None:
                     client_kwargs["timeout"] = _provider_timeout
-                if self.provider == "copilot-acp":
-                    client_kwargs["command"] = self.acp_command
-                    client_kwargs["args"] = self.acp_args
+                if self.provider in {"copilot-acp", "google-gemini-acp", "claude-acp"}:
+                    if self.acp_command:
+                        client_kwargs["command"] = self.acp_command
+                    if self.acp_args:
+                        client_kwargs["args"] = self.acp_args
                 effective_base = base_url
                 if "openrouter" in effective_base.lower():
                     client_kwargs["default_headers"] = {
@@ -5106,8 +5108,10 @@ class AIAgent:
 
             acp_kwargs = {k: v for k, v in client_kwargs.items()
                          if k in {"api_key", "base_url", "command", "args"}}
-            acp_kwargs.setdefault("command", "claude")
-            acp_kwargs.setdefault("args", ["--acp", "--stdio"])
+            if not acp_kwargs.get("command"):
+                acp_kwargs["command"] = "claude"
+            if not acp_kwargs.get("args"):
+                acp_kwargs["args"] = ["--acp", "--stdio"]
             client = CopilotACPClient(**acp_kwargs)
             logger.info(
                 "Claude ACP client created (%s, shared=%s) %s",
@@ -5121,6 +5125,10 @@ class AIAgent:
 
             acp_kwargs = {k: v for k, v in client_kwargs.items()
                          if k in {"api_key", "base_url", "command", "args"}}
+            if not acp_kwargs.get("command"):
+                acp_kwargs["command"] = "gemini"
+            if not acp_kwargs.get("args"):
+                acp_kwargs["args"] = ["--acp"]
             client = CopilotACPClient(**acp_kwargs)
             logger.info(
                 "Gemini ACP client created (%s, shared=%s) %s",
@@ -7601,6 +7609,11 @@ class AIAgent:
             # causing models like GLM-4.7 to truncate immediately (thinking
             # tokens alone exhaust the budget).  16384 provides adequate room.
             api_kwargs.update(self._max_tokens_param(16384))
+        elif self.provider in {"google-gemini-cli", "google-antigravity"}:
+            # Cloud Code / Gemini CLI OAuth models can spend tiny default output
+            # budgets entirely on internal thoughts, producing an empty visible
+            # reply. Give them a modest default output budget.
+            api_kwargs.update(self._max_tokens_param(256))
         elif self._is_qwen_portal():
             # Qwen Portal defaults to a very low max_tokens when omitted.
             # Reasoning models (qwen3-coder-plus) exhaust that budget on
@@ -9925,6 +9938,12 @@ class AIAgent:
                     # attempt — switch to non-streaming for the rest of this
                     # session instead of re-failing every retry.
                     if getattr(self, "_disable_streaming", False):
+                        _use_streaming = False
+                    elif self.provider in {"google-gemini-cli", "google-antigravity", "google-gemini-acp", "claude-acp", "copilot-acp"}:
+                        # Cloud Code and ACP subprocess paths are verified working in
+                        # non-streaming mode. The Hermes streaming wrapper either
+                        # drops visible content (Cloud Code) or expects an iterator
+                        # that ACP shims do not provide.
                         _use_streaming = False
                     elif not self._has_stream_consumers():
                         # No display/TTS consumer. Still prefer streaming for

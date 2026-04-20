@@ -1417,7 +1417,7 @@ def resolve_gemini_cli_process_credentials() -> Dict[str, Any]:
         or "gemini"
     )
     raw_args = os.getenv("HERMES_GEMINI_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    args = shlex.split(raw_args) if raw_args else ["--acp"]
     base_url = os.getenv("HERMES_GEMINI_ACP_BASE_URL", "").strip() or DEFAULT_GEMINI_ACP_BASE_URL
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
@@ -2717,25 +2717,45 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    if provider_id == "claude-acp":
+        command = (
+            os.getenv("HERMES_CLAUDE_ACP_COMMAND", "").strip()
+            or os.getenv("CLAUDE_CLI_PATH", "").strip()
+            or "claude"
+        )
+        raw_args = os.getenv("HERMES_CLAUDE_ACP_ARGS", "").strip()
+        args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+        missing_message = (
+            f"Could not find the Claude CLI command '{command}'. "
+            "Install Claude Code or set HERMES_CLAUDE_ACP_COMMAND/CLAUDE_CLI_PATH."
+        )
+        missing_code = "missing_claude_cli"
+        synthetic_api_key = "claude-acp"
+    else:
+        command = (
+            os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
+            or os.getenv("COPILOT_CLI_PATH", "").strip()
+            or "copilot"
+        )
+        raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+        args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+        missing_message = (
+            f"Could not find the Copilot CLI command '{command}'. "
+            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+        )
+        missing_code = "missing_copilot_cli"
+        synthetic_api_key = "copilot-acp"
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            missing_message,
             provider=provider_id,
-            code="missing_copilot_cli",
+            code=missing_code,
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": synthetic_api_key,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

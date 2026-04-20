@@ -418,6 +418,19 @@ class TestResolveApiKeyProviderCredentials:
         assert creds["args"] == ["--acp", "--stdio"]
         assert creds["source"] == "process"
 
+    def test_resolve_claude_acp_with_local_cli(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CLAUDE_ACP_ARGS", "--acp --stdio --verbose")
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+
+        creds = resolve_external_process_provider_credentials("claude-acp")
+
+        assert creds["provider"] == "claude-acp"
+        assert creds["api_key"] == "claude-acp"
+        assert creds["base_url"] == "acp://claude-code"
+        assert creds["command"] == "/usr/local/bin/claude"
+        assert creds["args"] == ["--acp", "--stdio", "--verbose"]
+        assert creds["source"] == "process"
+
     def test_resolve_kimi_with_key(self, monkeypatch):
         monkeypatch.setenv("KIMI_API_KEY", "kimi-secret-key")
         creds = resolve_api_key_provider_credentials("kimi-coding")
@@ -593,6 +606,21 @@ class TestRuntimeProviderResolution:
         assert result["base_url"] == "acp://copilot"
         assert result["command"] == "/usr/local/bin/copilot"
         assert result["args"] == ["--acp", "--stdio", "--debug"]
+
+    def test_runtime_claude_acp_uses_process_runtime(self, monkeypatch):
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+        monkeypatch.setenv("HERMES_CLAUDE_ACP_ARGS", "--acp --stdio --verbose")
+
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        result = resolve_runtime_provider(requested="claude-acp")
+
+        assert result["provider"] == "claude-acp"
+        assert result["api_mode"] == "chat_completions"
+        assert result["api_key"] == "claude-acp"
+        assert result["base_url"] == "acp://claude-code"
+        assert result["command"] == "/usr/local/bin/claude"
+        assert result["args"] == ["--acp", "--stdio", "--verbose"]
 
 
 # =============================================================================

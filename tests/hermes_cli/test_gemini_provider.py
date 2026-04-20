@@ -290,6 +290,57 @@ class TestGeminiAgentInit:
         assert mock_client.call_args.kwargs["api_key"] == "oauth-token"
         assert mock_client.call_args.kwargs["base_url"] == "cloudcode-pa://google"
 
+    def test_google_gemini_acp_resolve_provider_client_uses_process_runtime(self):
+        with patch(
+            "hermes_cli.auth.resolve_gemini_cli_process_credentials",
+            return_value={
+                "api_key": "gemini-cli-acp",
+                "base_url": "acp://gemini-cli",
+                "command": "/usr/bin/gemini",
+                "args": ["--acp"],
+            },
+        ), patch("agent.copilot_acp_client.CopilotACPClient") as mock_client:
+            mock_client.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_provider_client
+            resolve_provider_client("google-gemini-acp", model="gemini-3.1-pro-preview")
+
+        mock_client.assert_called_once()
+        assert mock_client.call_args.kwargs["command"] == "/usr/bin/gemini"
+        assert mock_client.call_args.kwargs["args"] == ["--acp"]
+
+    def test_validate_requested_model_accepts_google_gemini_acp_catalog_models(self):
+        from hermes_cli.models import validate_requested_model
+
+        result = validate_requested_model("gemini-3.1-pro-preview", provider="google-gemini-acp")
+
+        assert result["accepted"] is True
+        assert result["persist"] is True
+        assert result["recognized"] is True
+
+    def test_cloudcode_marker_context_length_uses_google_provider_metadata(self):
+        from agent.model_metadata import get_model_context_length
+
+        ctx = get_model_context_length(
+            "gemini-3.1-pro-preview",
+            base_url="cloudcode-pa://google",
+            provider="google-gemini-cli",
+            api_key="dummy",
+        )
+
+        assert ctx == 1048576
+
+    def test_gemini_acp_marker_context_length_uses_google_provider_metadata(self):
+        from agent.model_metadata import get_model_context_length
+
+        ctx = get_model_context_length(
+            "gemini-3.1-pro-preview",
+            base_url="acp://gemini-cli",
+            provider="google-gemini-acp",
+            api_key="dummy",
+        )
+
+        assert ctx == 1048576
+
 
 # ── models.dev Integration ──
 

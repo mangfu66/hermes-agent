@@ -1804,17 +1804,14 @@ def resolve_provider_client(
                 else (client, final_model))
 
     if pconfig.auth_type == "external_process":
-        creds = resolve_external_process_provider_credentials(provider)
+        if provider == "google-gemini-acp":
+            from hermes_cli.auth import resolve_gemini_cli_process_credentials
+            creds = resolve_gemini_cli_process_credentials()
+        else:
+            creds = resolve_external_process_provider_credentials(provider)
         final_model = _normalize_resolved_model(model or _read_main_model(), provider)
         if provider in ("copilot-acp", "google-gemini-acp", "claude-acp"):
-            if provider == "google-gemini-acp":
-                from hermes_cli.auth import resolve_gemini_cli_process_credentials
-                acp_creds = resolve_gemini_cli_process_credentials()
-                api_key = str(acp_creds.get("api_key", "")).strip()
-                base_url = str(acp_creds.get("base_url", "")).strip()
-                command = str(acp_creds.get("command", "")).strip() or None
-                args = list(acp_creds.get("args") or [])
-            elif provider == "claude-acp":
+            if provider == "claude-acp":
                 api_key = str(creds.get("api_key", "")).strip() or "claude-acp"
                 base_url = str(creds.get("base_url", "")).strip() or "acp://claude-code"
                 command = str(creds.get("command", "")).strip() or "claude"

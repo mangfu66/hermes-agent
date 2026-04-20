@@ -184,6 +184,58 @@ class TestProviderModelNormalization:
         assert agent.model == "anthropic/claude-sonnet-4.6"
 
 
+class TestExternalProcessProviderInit:
+    def test_google_gemini_acp_uses_gemini_defaults_for_explicit_runtime(self):
+        with (
+            patch(
+                "run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("agent.copilot_acp_client.CopilotACPClient") as mock_client,
+        ):
+            mock_client.return_value = MagicMock()
+            agent = AIAgent(
+                model="gemini-3.1-pro-preview",
+                provider="google-gemini-acp",
+                base_url="acp://gemini-cli",
+                api_key="gemini-cli-acp",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert mock_client.call_args_list[0].kwargs["command"] == "gemini"
+        assert mock_client.call_args_list[0].kwargs["args"] == ["--acp"]
+        try:
+            agent.close()
+        except Exception:
+            pass
+
+
+class TestCloudCodeStreamingSelection:
+    def test_google_gemini_cli_init_works_with_cloudcode_marker(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                model="gemini-3.1-pro-preview",
+                provider="google-gemini-cli",
+                base_url="cloudcode-pa://google",
+                api_key="oauth-token",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert agent.provider == "google-gemini-cli"
+        try:
+            agent.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Helper to build mock assistant messages (API response objects)
 # ---------------------------------------------------------------------------

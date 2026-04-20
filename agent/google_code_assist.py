@@ -30,11 +30,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -58,13 +61,55 @@ FREE_TIER_ID = "free-tier"
 LEGACY_TIER_ID = "legacy-tier"
 STANDARD_TIER_ID = "standard-tier"
 
-# Default HTTP headers matching gemini-cli's fingerprint.
-# Google may reject unrecognized User-Agents on these internal endpoints.
-_GEMINI_CLI_USER_AGENT = "google-api-nodejs-client/9.15.1 (gzip)"
-_X_GOOG_API_CLIENT = "gl-node/24.0.0"
+# Official gemini-cli uses a dynamic User-Agent like:
+#   GeminiCLI/<version>/<model> (linux; x64; terminal)
+# We mirror that shape instead of the older generic Node client fingerprint.
 _DEFAULT_REQUEST_TIMEOUT = 30.0
 _ONBOARDING_POLL_ATTEMPTS = 12
 _ONBOARDING_POLL_INTERVAL_SECONDS = 5.0
+
+
+@lru_cache(maxsize=1)
+def _resolve_gemini_cli_version() -> str:
+    env_version = str(os.getenv("HERMES_GEMINI_CLI_VERSION", "") or "").strip()
+    if env_version:
+        return env_version
+    gemini_bin = shutil.which("gemini")
+    if gemini_bin:
+        try:
+            out = subprocess.check_output([gemini_bin, "--version"], text=True, timeout=5)
+            ver = str(out).strip().splitlines()[0].strip()
+            if ver:
+                return ver
+        except Exception:
+            pass
+    return "unknown"
+
+
+def _cli_surface() -> str:
+    return (
+        os.getenv("GEMINI_CLI_SURFACE")
+        or os.getenv("SURFACE")
+        or ("vscode" if (os.getenv("TERM_PROGRAM") == "vscode" or os.getenv("VSCODE_PID")) else "terminal")
+    )
+
+
+def _cli_arch() -> str:
+    machine = os.uname().machine.lower()
+    if machine in {"x86_64", "amd64"}:
+        return "x64"
+    if machine in {"aarch64", "arm64"}:
+        return "arm64"
+    return machine
+
+
+def build_gemini_cli_user_agent(model: str = "") -> str:
+    version = _resolve_gemini_cli_version()
+    model_part = str(model or "unknown").strip() or "unknown"
+    return f"GeminiCLI/{version}/{model_part} ({os.uname().sysname.lower()}; {_cli_arch()}; {_cli_surface()})"
+
+
+_GEMINI_CLI_USER_AGENT = build_gemini_cli_user_agent()
 
 
 class CodeAssistError(RuntimeError):
@@ -119,16 +164,12 @@ class ProjectIdRequiredError(CodeAssistError):
 # =============================================================================
 
 def _build_headers(access_token: str, *, user_agent_model: str = "") -> Dict[str, str]:
-    ua = _GEMINI_CLI_USER_AGENT
-    if user_agent_model:
-        ua = f"{ua} model/{user_agent_model}"
+    ua = build_gemini_cli_user_agent(user_agent_model)
     return {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Authorization": f"Bearer {access_token}",
         "User-Agent": ua,
-        "X-Goog-Api-Client": _X_GOOG_API_CLIENT,
-        "x-activity-request-id": str(uuid.uuid4()),
     }
 
 

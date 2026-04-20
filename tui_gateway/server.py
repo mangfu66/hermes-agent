@@ -588,6 +588,25 @@ def _compress_session_history(session: dict, focus_topic: str | None = None) -> 
     return len(history) - len(compressed), _get_usage(agent)
 
 
+def _maybe_auto_compress_history(session: dict, focus_topic: str | None = None) -> int:
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    history = session.get("history", []) or []
+    if len(history) < _AUTO_COMPRESS_MIN_MSGS:
+        return 0
+
+    comp = getattr(session.get("agent"), "context_compressor", None)
+    threshold_tokens = int(getattr(comp, "threshold_tokens", 0) or 0)
+    approx_tokens = estimate_messages_tokens_rough(history)
+    trigger_tokens = max(threshold_tokens, _AUTO_COMPRESS_TOKEN_FLOOR)
+
+    if len(history) < _AUTO_COMPRESS_FORCE_MSGS and approx_tokens < trigger_tokens:
+        return 0
+
+    removed, _ = _compress_session_history(session, focus_topic)
+    return removed
+
+
 def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
@@ -1007,8 +1026,8 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         base_url=runtime.get("base_url"),
         provider=runtime.get("provider"),
         api_mode=runtime.get("api_mode") or None,
-        acp_command=runtime.get("acp_command"),
-        acp_args=runtime.get("acp_args"),
+        acp_command=runtime.get("command"),
+        acp_args=runtime.get("args"),
         credential_pool=runtime.get("credential_pool"),
         quiet_mode=True,
         verbose_logging=_load_tool_progress_mode() == "verbose",
@@ -1114,6 +1133,12 @@ _DISPLAY_TEXT_MAX = 3000
 # and session.history.  Older messages stay in the DB; the agent still loads
 # the full history for its reasoning context.
 _DISPLAY_MSG_LIMIT = 150
+
+# Conservative auto-compaction guard for giant in-memory histories.  This only
+# fires when history is obviously large enough to hurt TUI memory.
+_AUTO_COMPRESS_MIN_MSGS = 80
+_AUTO_COMPRESS_FORCE_MSGS = 200
+_AUTO_COMPRESS_TOKEN_FLOOR = 40000
 
 
 def _history_to_messages(history: list[dict], limit: int | None = None) -> list[dict]:
@@ -1309,13 +1334,16 @@ def _(rid, params: dict) -> dict:
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
-        messages = _history_to_messages(history, limit=_DISPLAY_MSG_LIMIT)
         tokens = _set_session_context(target)
         try:
             agent = _make_agent(sid, target, session_id=target)
         finally:
             _clear_session_context(tokens)
         _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        session = _sessions[sid]
+        with session["history_lock"]:
+            auto_removed = _maybe_auto_compress_history(session)
+            messages = _history_to_messages(session.get("history", []), limit=_DISPLAY_MSG_LIMIT)
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
     return _ok(
@@ -1326,6 +1354,7 @@ def _(rid, params: dict) -> dict:
             "message_count": len(messages),
             "messages": messages,
             "info": _session_info(agent),
+            "auto_compressed": auto_removed,
         },
     )
 
@@ -1547,6 +1576,7 @@ def _(rid, params: dict) -> dict:
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
+        _maybe_auto_compress_history(session, str(text or "")[:200])
         session["running"] = True
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -1810,7 +1840,9 @@ def _(rid, params: dict) -> dict:
     text, sid = params.get("text", ""), params.get("session_id", "")
     if not text:
         return _err(rid, 4012, "text required")
-    snapshot = list(session.get("history", []))
+    with session["history_lock"]:
+        _maybe_auto_compress_history(session, str(text or "")[:200])
+        snapshot = list(session.get("history", []))
 
     def run():
         session_tokens = _set_session_context(session["session_key"])
@@ -1823,8 +1855,8 @@ def _(rid, params: dict) -> dict:
                 base_url=runtime.get("base_url"),
                 provider=runtime.get("provider"),
                 api_mode=runtime.get("api_mode") or None,
-                acp_command=runtime.get("acp_command"),
-                acp_args=runtime.get("acp_args"),
+                acp_command=runtime.get("command"),
+                acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
                 quiet_mode=True,
                 platform="tui",

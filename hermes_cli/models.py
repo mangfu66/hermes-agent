@@ -2119,8 +2119,9 @@ def validate_requested_model(
             "message": message,
         }
 
-    # OpenAI Codex and Gemini CLI OAuth have their own catalog path; /v1/models probing is not the right validation path.
-    if normalized in {"openai-codex", "google-gemini-cli", "google-antigravity"}:
+    # OpenAI Codex and Gemini CLI-family providers have their own catalog path;
+    # /v1/models probing is not the right validation path.
+    if normalized in {"openai-codex", "google-gemini-cli", "google-gemini-acp", "google-antigravity"}:
         try:
             provider_models = provider_model_ids(normalized)
         except Exception:
@@ -2147,7 +2148,14 @@ def validate_requested_model(
             suggestion_text = ""
             if suggestions:
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
-            provider_label = "OpenAI Codex" if normalized == "openai-codex" else "Google Gemini CLI OAuth"
+            if normalized == "openai-codex":
+                provider_label = "OpenAI Codex"
+            elif normalized == "google-gemini-acp":
+                provider_label = "Google Gemini CLI (ACP)"
+            elif normalized == "google-antigravity":
+                provider_label = "Google Antigravity"
+            else:
+                provider_label = "Google Gemini CLI OAuth"
             return {
                 "accepted": False,
                 "persist": False,

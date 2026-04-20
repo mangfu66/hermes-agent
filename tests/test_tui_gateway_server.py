@@ -279,6 +279,63 @@ def test_session_compress_uses_compress_helper(monkeypatch):
     emit.assert_called_once_with("session.info", "sid", {"model": "x"})
 
 
+def test_maybe_auto_compress_history_skips_small_history(monkeypatch):
+    agent = types.SimpleNamespace(context_compressor=types.SimpleNamespace(threshold_tokens=1000))
+    session = _session(agent=agent, history=[{"role": "user", "content": "hi"}] * 4)
+
+    monkeypatch.setattr(server, "_compress_session_history", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not compress")))
+
+    assert server._maybe_auto_compress_history(session) == 0
+
+
+def test_maybe_auto_compress_history_uses_compress_helper_for_large_history(monkeypatch):
+    agent = types.SimpleNamespace(context_compressor=types.SimpleNamespace(threshold_tokens=1000))
+    session = _session(agent=agent, history=[{"role": "user", "content": "x" * 1000}] * 90)
+
+    monkeypatch.setattr("agent.model_metadata.estimate_messages_tokens_rough", lambda history: 50000)
+    monkeypatch.setattr(server, "_compress_session_history", lambda session, focus_topic=None: (7, {"total": 42}))
+
+    assert server._maybe_auto_compress_history(session, "focus") == 7
+
+
+def test_prompt_submit_auto_compresses_before_snapshot(monkeypatch):
+    captured = {}
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            captured["history"] = list(conversation_history or [])
+            return {"final_response": "ok", "messages": [{"role": "assistant", "content": "ok"}]}
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    session = _session(agent=_Agent(), history=[
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+    ])
+    server._sessions["sid"] = session
+
+    def _fake_auto(sess, focus_topic=None):
+        sess["history"] = sess["history"][-1:]
+        sess["history_version"] = int(sess.get("history_version", 0)) + 1
+        return 1
+
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_maybe_auto_compress_history", _fake_auto)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+    resp = server.handle_request({"id": "1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "ping"}})
+
+    assert resp["result"]["status"] == "streaming"
+    assert captured["history"] == [{"role": "assistant", "content": "second"}]
+
+
 def test_prompt_submit_sets_approval_session_key(monkeypatch):
     from tools.approval import get_current_session_key
 
