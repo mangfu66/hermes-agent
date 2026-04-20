@@ -128,6 +128,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "gemini": [
         "gemini-3.1-pro-preview",
+        "gemini-3-pro-preview",
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro",
@@ -136,6 +137,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "google-gemini-cli": [
         "gemini-3.1-pro-preview",
+        "gemini-3-pro-preview",
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro",
