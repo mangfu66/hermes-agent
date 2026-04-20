@@ -279,7 +279,7 @@ class TestGeminiAgentInit:
 
     def test_google_gemini_cli_resolve_provider_client_uses_oauth_runtime(self):
         with patch(
-            "agent.auxiliary_client.resolve_gemini_oauth_runtime_credentials",
+            "hermes_cli.auth.resolve_gemini_oauth_runtime_credentials",
             return_value={"api_key": "oauth-token", "base_url": "cloudcode-pa://google"},
         ), patch("agent.gemini_cloudcode_adapter.GeminiCloudCodeClient") as mock_client:
             mock_client.return_value = MagicMock()
