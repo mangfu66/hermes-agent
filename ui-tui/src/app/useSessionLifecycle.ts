@@ -1,6 +1,7 @@
 import type { ScrollBoxHandle } from '@hermes/ink'
 import { type RefObject, useCallback } from 'react'
 
+import { capHistory } from '../config/limits.js'
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import { introMsg, toTranscriptMessages } from '../domain/messages.js'
 import { ZERO } from '../domain/usage.js'
@@ -179,7 +180,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
               const resumed = toTranscriptMessages(r.messages)
 
-              setHistoryItems(r.info ? [introMsg(r.info), ...resumed] : resumed)
+              setHistoryItems(capHistory(r.info ? [introMsg(r.info), ...resumed] : resumed))
               patchUiState({
                 info: r.info ?? null,
                 sid: r.session_id,

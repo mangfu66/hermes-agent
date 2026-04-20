@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 # Only these are stripped — Ollama-style "model:tag" colons (e.g. "qwen3.5:27b")
 # are preserved so the full model name reaches cache lookups and server queries.
 _PROVIDER_PREFIXES: frozenset[str] = frozenset({
-    "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
+    "openrouter", "nous", "openai-codex", "copilot", "copilot-acp", "claude-acp",
+    "google-gemini-cli", "google-gemini-acp", "google-antigravity",
     "gemini", "ollama-cloud", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "anthropic", "deepseek",
     "opencode-zen", "opencode-go", "ai-gateway", "kilocode", "alibaba",
     "qwen-oauth",
@@ -109,6 +110,10 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-sonnet-4-6": 1000000,
     "claude-opus-4.6": 1000000,
     "claude-sonnet-4.6": 1000000,
+    # Antigravity thinking variants — same context as their base models
+    "claude-opus-4-7-thinking": 1000000,
+    "claude-opus-4-6-thinking": 1000000,
+    "claude-sonnet-4-5-thinking": 200000,
     # Catch-all for older Claude models (must sort after specific entries)
     "claude": 200000,
     # OpenAI — GPT-5 family (most have 400k; specific overrides first)
@@ -120,7 +125,15 @@ DEFAULT_CONTEXT_LENGTHS = {
     "gpt-5": 400000,                  # GPT-5.x base, mini, codex variants (400k)
     "gpt-4.1": 1047576,
     "gpt-4": 128000,
-    # Google
+    # Google Gemini — specific preview model names first (longest match wins)
+    "gemini-3.1-pro": 1048576,
+    "gemini-3-pro": 1048576,
+    "gemini-3.1-flash": 1048576,
+    "gemini-3-flash": 1048576,
+    "gemini-2.5-pro": 1048576,
+    "gemini-2.5-flash": 1048576,
+    "gemini-2.0-flash": 1048576,
+    # Catch-all for all other gemini models
     "gemini": 1048576,
     # Gemma (open models served via AI Studio)
     "gemma-4-31b": 256000,

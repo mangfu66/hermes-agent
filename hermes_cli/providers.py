@@ -69,6 +69,25 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         auth_type="oauth_external",
         base_url_override="cloudcode-pa://google",
     ),
+    "google-gemini-acp": HermesOverlay(
+        transport="codex_responses",
+        auth_type="external_process",
+        base_url_override="acp://gemini-cli",
+        base_url_env_var="HERMES_GEMINI_ACP_BASE_URL",
+        extra_env_vars=("HERMES_GEMINI_ACP_COMMAND", "GEMINI_CLI_PATH"),
+    ),
+    "google-antigravity": HermesOverlay(
+        transport="openai_chat",
+        auth_type="oauth_external",
+        base_url_override="cloudcode-pa://google",
+    ),
+    "claude-acp": HermesOverlay(
+        transport="anthropic_messages",
+        auth_type="external_process",
+        base_url_override="acp://claude-code",
+        base_url_env_var="HERMES_CLAUDE_ACP_BASE_URL",
+        extra_env_vars=("HERMES_CLAUDE_ACP_COMMAND", "CLAUDE_CLI_PATH"),
+    ),
     "copilot-acp": HermesOverlay(
         transport="codex_responses",
         auth_type="external_process",
@@ -251,6 +270,14 @@ ALIASES: Dict[str, str] = {
     # google-gemini-cli (OAuth + Code Assist)
     "gemini-cli": "google-gemini-cli",
     "gemini-oauth": "google-gemini-cli",
+    # google-gemini-acp (local CLI process)
+    "gemini-acp": "google-gemini-acp",
+    # google-antigravity (paid tier OAuth)
+    "antigravity": "google-antigravity",
+    "urtal": "google-antigravity",
+    # claude-acp (Claude Code local process)
+    "claude-code-acp": "claude-acp",
+    "claude-stdio": "claude-acp",
 
 
     # huggingface
@@ -292,6 +319,10 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "google-gemini-acp": "Gemini CLI (ACP)",
+    "google-gemini-cli": "Gemini (OAuth)",
+    "google-antigravity": "Antigravity (OAuth)",
+    "claude-acp": "Claude Code ACP",
     "xiaomi": "Xiaomi MiMo",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",

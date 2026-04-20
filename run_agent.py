@@ -5101,18 +5101,50 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
-        if self.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
+        if self.provider == "claude-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://claude-code"):
+            from agent.copilot_acp_client import CopilotACPClient
+
+            acp_kwargs = {k: v for k, v in client_kwargs.items()
+                         if k in {"api_key", "base_url", "command", "args"}}
+            acp_kwargs.setdefault("command", "claude")
+            acp_kwargs.setdefault("args", ["--acp", "--stdio"])
+            client = CopilotACPClient(**acp_kwargs)
+            logger.info(
+                "Claude ACP client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
+        if str(client_kwargs.get("base_url", "")).startswith("acp://gemini-cli"):
+            from agent.copilot_acp_client import CopilotACPClient
+
+            acp_kwargs = {k: v for k, v in client_kwargs.items()
+                         if k in {"api_key", "base_url", "command", "args"}}
+            client = CopilotACPClient(**acp_kwargs)
+            logger.info(
+                "Gemini ACP client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
+        if self.provider in ("google-gemini-cli", "google-antigravity") or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
             from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 
             # Strip OpenAI-specific kwargs the Gemini client doesn't accept
             safe_kwargs = {
                 k: v for k, v in client_kwargs.items()
-                if k in {"api_key", "base_url", "default_headers", "project_id", "timeout"}
+                if k in {"api_key", "base_url", "default_headers", "project_id", "timeout", "ide_type"}
             }
+            # Antigravity unlocks paid-tier models via a different ideType
+            if self.provider == "google-antigravity" and "ide_type" not in safe_kwargs:
+                safe_kwargs["ide_type"] = "ANTIGRAVITY"
             client = GeminiCloudCodeClient(**safe_kwargs)
             logger.info(
-                "Gemini Cloud Code Assist client created (%s, shared=%s) %s",
+                "Gemini Cloud Code Assist client created (%s, ide_type=%s, shared=%s) %s",
                 reason,
+                safe_kwargs.get("ide_type", "IDE_UNSPECIFIED"),
                 shared,
                 self._client_log_context(),
             )

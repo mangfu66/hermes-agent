@@ -46,6 +46,8 @@ from agent.google_code_assist import (
     CodeAssistError,
     ProjectContext,
     resolve_project_context,
+    _GEMINI_CLI_USER_AGENT,
+    _X_GOOG_API_CLIENT,
 )
 
 logger = logging.getLogger(__name__)
@@ -594,6 +596,7 @@ class GeminiCloudCodeClient:
         base_url: Optional[str] = None,
         default_headers: Optional[Dict[str, str]] = None,
         project_id: str = "",
+        ide_type: str = "IDE_UNSPECIFIED",
         **_: Any,
     ):
         # `api_key` here is a dummy — real auth is the OAuth access token
@@ -603,6 +606,7 @@ class GeminiCloudCodeClient:
         self.base_url = base_url or MARKER_BASE_URL
         self._default_headers = dict(default_headers or {})
         self._configured_project_id = project_id
+        self._ide_type = ide_type
         self._project_context: Optional[ProjectContext] = None
         self._project_context_lock = False  # simple single-thread guard
         self.chat = _GeminiChatNamespace(self)
@@ -629,10 +633,17 @@ class GeminiCloudCodeClient:
             return self._project_context
 
         env_project = google_oauth.resolve_project_id_from_env()
-        creds = google_oauth.load_credentials()
-        stored_project = creds.project_id if creds else ""
 
-        # Prefer what's already baked into the creds
+        # ANTIGRAVITY uses a paid-tier project that may differ from the standard
+        # OAuth project stored in credentials — skip the cache and always
+        # discover fresh so Google assigns the correct tier/project.
+        creds = None
+        stored_project = ""
+        if self._ide_type != "ANTIGRAVITY":
+            creds = google_oauth.load_credentials()
+            stored_project = creds.project_id if creds else ""
+
+        # Prefer what's already baked into the creds (standard tier only)
         if stored_project:
             self._project_context = ProjectContext(
                 project_id=stored_project,
@@ -647,6 +658,7 @@ class GeminiCloudCodeClient:
             configured_project_id=self._configured_project_id,
             env_project_id=env_project,
             user_agent_model=model,
+            ide_type=self._ide_type,
         )
         # Persist discovered project back to the creds file so the next
         # session doesn't re-run the discovery.
@@ -701,8 +713,8 @@ class GeminiCloudCodeClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Authorization": f"Bearer {access_token}",
-            "User-Agent": "hermes-agent (gemini-cli-compat)",
-            "X-Goog-Api-Client": "gl-python/hermes",
+            "User-Agent": _GEMINI_CLI_USER_AGENT,
+            "X-Goog-Api-Client": _X_GOOG_API_CLIENT,
             "x-activity-request-id": str(uuid.uuid4()),
         }
         headers.update(self._default_headers)

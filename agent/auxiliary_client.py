@@ -179,6 +179,8 @@ def _fixed_temperature_for_model(
 _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "gemini": "gemini-3-flash-preview",
     "google-gemini-cli": "gemini-3-flash-preview",
+    "google-antigravity": "gemini-3-flash",
+    "claude-acp": "claude-sonnet-4-6",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
     "kimi-coding-cn": "kimi-k2-turbo-preview",
@@ -1804,21 +1806,35 @@ def resolve_provider_client(
     if pconfig.auth_type == "external_process":
         creds = resolve_external_process_provider_credentials(provider)
         final_model = _normalize_resolved_model(model or _read_main_model(), provider)
-        if provider == "copilot-acp":
-            api_key = str(creds.get("api_key", "")).strip()
-            base_url = str(creds.get("base_url", "")).strip()
-            command = str(creds.get("command", "")).strip() or None
-            args = list(creds.get("args") or [])
+        if provider in ("copilot-acp", "google-gemini-acp", "claude-acp"):
+            if provider == "google-gemini-acp":
+                from hermes_cli.auth import resolve_gemini_cli_process_credentials
+                acp_creds = resolve_gemini_cli_process_credentials()
+                api_key = str(acp_creds.get("api_key", "")).strip()
+                base_url = str(acp_creds.get("base_url", "")).strip()
+                command = str(acp_creds.get("command", "")).strip() or None
+                args = list(acp_creds.get("args") or [])
+            elif provider == "claude-acp":
+                api_key = str(creds.get("api_key", "")).strip() or "claude-acp"
+                base_url = str(creds.get("base_url", "")).strip() or "acp://claude-code"
+                command = str(creds.get("command", "")).strip() or "claude"
+                args = list(creds.get("args") or ["--acp", "--stdio"])
+            else:
+                api_key = str(creds.get("api_key", "")).strip()
+                base_url = str(creds.get("base_url", "")).strip()
+                command = str(creds.get("command", "")).strip() or None
+                args = list(creds.get("args") or [])
             if not final_model:
                 logger.warning(
-                    "resolve_provider_client: copilot-acp requested but no model "
-                    "was provided or configured"
+                    "resolve_provider_client: %s requested but no model "
+                    "was provided or configured", provider,
                 )
                 return None, None
-            if not api_key or not base_url:
+            needs_api_key = provider != "claude-acp"
+            if (needs_api_key and not api_key) or not base_url:
                 logger.warning(
-                    "resolve_provider_client: copilot-acp requested but external "
-                    "process credentials are incomplete"
+                    "resolve_provider_client: %s requested but external "
+                    "process credentials are incomplete", provider,
                 )
                 return None, None
             from agent.copilot_acp_client import CopilotACPClient
@@ -1842,19 +1858,20 @@ def resolve_provider_client(
             return resolve_provider_client("nous", model, async_mode)
         if provider == "openai-codex":
             return resolve_provider_client("openai-codex", model, async_mode)
-        if provider == "google-gemini-cli":
+        if provider in ("google-gemini-cli", "google-antigravity"):
+            final_model = _normalize_resolved_model(
+                model or _API_KEY_PROVIDER_AUX_MODELS.get(provider, _API_KEY_PROVIDER_AUX_MODELS.get("google-gemini-cli", "")) or _read_main_model() or "gemini-3-flash-preview",
+                provider,
+            )
             creds = resolve_gemini_oauth_runtime_credentials()
             api_key = str(creds.get("api_key", "")).strip()
             base_url = str(creds.get("base_url", "")).strip() or "cloudcode-pa://google"
             if not api_key:
-                logger.warning("resolve_provider_client: google-gemini-cli requested but no OAuth token was resolved")
+                logger.warning("resolve_provider_client: %s requested but no OAuth token was resolved", provider)
                 return None, None
-            final_model = _normalize_resolved_model(
-                model or _API_KEY_PROVIDER_AUX_MODELS.get("google-gemini-cli", "") or _read_main_model() or "gemini-3-flash-preview",
-                provider,
-            )
             from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
-            client = GeminiCloudCodeClient(api_key=api_key, base_url=base_url)
+            ide_type = "ANTIGRAVITY" if provider == "google-antigravity" else "IDE_UNSPECIFIED"
+            client = GeminiCloudCodeClient(api_key=api_key, base_url=base_url, ide_type=ide_type)
             logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
             return (_to_async_client(client, final_model) if async_mode else (client, final_model))
         # Other OAuth providers not directly supported

@@ -143,12 +143,42 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "google-gemini-cli": [
         "gemini-3.1-pro-preview",
-        "gemini-3-pro-preview",
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro",
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
+    ],
+    "google-gemini-acp": [
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ],
+    "google-antigravity": [
+        # Claude models available via Antigravity (urtal subscription)
+        "claude-opus-4-7-thinking",
+        "claude-opus-4-6-thinking",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        # Gemini models — high/low thinking tiers + standard
+        "gemini-3.1-pro-high",
+        "gemini-3.1-pro-low",
+        "gemini-3-pro-high",
+        "gemini-3-pro-low",
+        "gemini-3.1-flash",
+        "gemini-3-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ],
+    "claude-acp": [
+        # Claude models via local `claude --acp --stdio` (Claude Code subscription)
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
     ],
     "zai": [
         "glm-5.1",
@@ -564,6 +594,9 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("huggingface",    "Hugging Face",             "Hugging Face Inference Providers (20+ open models)"),
     ProviderEntry("gemini",         "Google AI Studio",         "Google AI Studio (Gemini models — native Gemini API)"),
     ProviderEntry("google-gemini-cli", "Google Gemini (OAuth)",   "Google Gemini via OAuth + Code Assist (free tier supported; no API key needed)"),
+    ProviderEntry("google-gemini-acp", "Google Gemini CLI (ACP)", "Google Gemini via local `gemini --acp --stdio` process (uses CLI's own auth; all subscription models available)"),
+    ProviderEntry("google-antigravity", "Google Antigravity (OAuth)", "Google Antigravity — paid urtal subscription via Google OAuth; supports Claude + Gemini models"),
+    ProviderEntry("claude-acp",     "Claude Code ACP",          "Claude Code ACP (spawns `claude --acp --stdio`; uses Claude Code subscription; no API key)"),
     ProviderEntry("deepseek",       "DeepSeek",                 "DeepSeek (DeepSeek-V3, R1, coder — direct API)"),
     ProviderEntry("xai",            "xAI",                      "xAI (Grok models — direct API)"),
     ProviderEntry("zai",            "Z.AI / GLM",               "Z.AI / GLM (Zhipu AI direct API)"),
@@ -628,6 +661,10 @@ _PROVIDER_ALIASES = {
     "qwen-portal": "qwen-oauth",
     "gemini-cli": "google-gemini-cli",
     "gemini-oauth": "google-gemini-cli",
+    "antigravity": "google-antigravity",
+    "urtal": "google-antigravity",
+    "claude-code-acp": "claude-acp",
+    "claude-stdio": "claude-acp",
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
@@ -2083,7 +2120,7 @@ def validate_requested_model(
         }
 
     # OpenAI Codex and Gemini CLI OAuth have their own catalog path; /v1/models probing is not the right validation path.
-    if normalized in {"openai-codex", "google-gemini-cli"}:
+    if normalized in {"openai-codex", "google-gemini-cli", "google-antigravity"}:
         try:
             provider_models = provider_model_ids(normalized)
         except Exception:

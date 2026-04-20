@@ -132,10 +132,10 @@ def _build_headers(access_token: str, *, user_agent_model: str = "") -> Dict[str
     }
 
 
-def _client_metadata() -> Dict[str, str]:
+def _client_metadata(ide_type: str = "IDE_UNSPECIFIED") -> Dict[str, str]:
     """Match Google's gemini-cli exactly — unrecognized metadata may be rejected."""
     return {
-        "ideType": "IDE_UNSPECIFIED",
+        "ideType": ide_type,
         "platform": "PLATFORM_UNSPECIFIED",
         "pluginType": "GEMINI",
     }
@@ -222,6 +222,7 @@ def load_code_assist(
     *,
     project_id: str = "",
     user_agent_model: str = "",
+    ide_type: str = "IDE_UNSPECIFIED",
 ) -> CodeAssistProjectInfo:
     """Call ``POST /v1internal:loadCodeAssist`` with prod → sandbox fallback.
 
@@ -231,7 +232,7 @@ def load_code_assist(
     body: Dict[str, Any] = {
         "metadata": {
             "duetProject": project_id,
-            **_client_metadata(),
+            **_client_metadata(ide_type),
         },
     }
     if project_id:
@@ -289,6 +290,7 @@ def onboard_user(
     tier_id: str,
     project_id: str = "",
     user_agent_model: str = "",
+    ide_type: str = "IDE_UNSPECIFIED",
 ) -> Dict[str, Any]:
     """Call ``POST /v1internal:onboardUser`` to provision the user.
 
@@ -307,7 +309,7 @@ def onboard_user(
 
     body: Dict[str, Any] = {
         "tierId": tier_id,
-        "metadata": _client_metadata(),
+        "metadata": _client_metadata(ide_type),
     }
     if project_id:
         body["cloudaicompanionProject"] = project_id
@@ -396,6 +398,7 @@ def resolve_project_context(
     configured_project_id: str = "",
     env_project_id: str = "",
     user_agent_model: str = "",
+    ide_type: str = "IDE_UNSPECIFIED",
 ) -> ProjectContext:
     """Figure out what project id + tier to use for requests.
 
@@ -420,7 +423,7 @@ def resolve_project_context(
         )
 
     # Discover via loadCodeAssist
-    info = load_code_assist(access_token, user_agent_model=user_agent_model)
+    info = load_code_assist(access_token, user_agent_model=user_agent_model, ide_type=ide_type)
 
     effective_project = info.cloudaicompanion_project
     tier = info.current_tier_id
@@ -432,6 +435,7 @@ def resolve_project_context(
             tier_id=FREE_TIER_ID,
             project_id="",
             user_agent_model=user_agent_model,
+            ide_type=ide_type,
         )
         # Re-parse from the onboard response
         response_body = onboard_resp.get("response") or {}

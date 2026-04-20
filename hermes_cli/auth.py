@@ -81,6 +81,8 @@ QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 
 # Google Gemini OAuth (google-gemini-cli provider, Cloud Code Assist backend)
 DEFAULT_GEMINI_CLOUDCODE_BASE_URL = "cloudcode-pa://google"
+DEFAULT_GEMINI_ACP_BASE_URL = "acp://gemini-cli"
+DEFAULT_CLAUDE_ACP_BASE_URL = "acp://claude-code"
 GEMINI_OAUTH_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 60  # refresh 60s before expiry
 
 
@@ -147,6 +149,26 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "google-gemini-acp": ProviderConfig(
+        id="google-gemini-acp",
+        name="Google Gemini CLI (ACP)",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_GEMINI_ACP_BASE_URL,
+        base_url_env_var="HERMES_GEMINI_ACP_BASE_URL",
+    ),
+    "google-antigravity": ProviderConfig(
+        id="google-antigravity",
+        name="Google Antigravity (OAuth)",
+        auth_type="oauth_external",
+        inference_base_url=DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
+    ),
+    "claude-acp": ProviderConfig(
+        id="claude-acp",
+        name="Claude Code ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CLAUDE_ACP_BASE_URL,
+        base_url_env_var="HERMES_CLAUDE_ACP_BASE_URL",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -997,7 +1019,9 @@ def resolve_provider(
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
         "aigateway": "ai-gateway", "vercel": "ai-gateway", "vercel-ai-gateway": "ai-gateway",
         "opencode": "opencode-zen", "zen": "opencode-zen",
-        "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
+        "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli", "google-gemini-acp": "google-gemini-acp", "gemini-acp": "google-gemini-acp",
+        "google-antigravity": "google-antigravity", "antigravity": "google-antigravity", "urtal": "google-antigravity",
+        "claude-acp": "claude-acp", "claude-code-acp": "claude-acp", "claude-stdio": "claude-acp",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
         "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
         "aws": "bedrock", "aws-bedrock": "bedrock", "amazon-bedrock": "bedrock", "amazon": "bedrock",
@@ -1384,6 +1408,32 @@ def get_gemini_oauth_auth_status() -> Dict[str, Any]:
         "project_id": creds.project_id,
     }
 
+
+def resolve_gemini_cli_process_credentials() -> Dict[str, Any]:
+    """Resolve a local official `gemini --acp --stdio` runtime when available."""
+    command = (
+        os.getenv("HERMES_GEMINI_ACP_COMMAND", "").strip()
+        or os.getenv("GEMINI_CLI_PATH", "").strip()
+        or "gemini"
+    )
+    raw_args = os.getenv("HERMES_GEMINI_ACP_ARGS", "").strip()
+    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    base_url = os.getenv("HERMES_GEMINI_ACP_BASE_URL", "").strip() or DEFAULT_GEMINI_ACP_BASE_URL
+    resolved_command = shutil.which(command) if command else None
+    if not resolved_command and not base_url.startswith("acp+tcp://"):
+        raise AuthError(
+            f"Could not find the Gemini CLI command '{command}'. Install `gemini-cli` or set HERMES_GEMINI_ACP_COMMAND/GEMINI_CLI_PATH.",
+            provider="google-gemini-cli",
+            code="missing_gemini_cli",
+        )
+    return {
+        "provider": "google-gemini-cli",
+        "api_key": "gemini-cli-acp",
+        "base_url": base_url.rstrip("/"),
+        "command": resolved_command or command,
+        "args": args,
+        "source": "process",
+    }
 
 
 # =============================================================================

@@ -1105,7 +1105,18 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
     return text or "What do you see in this image?"
 
 
-def _history_to_messages(history: list[dict]) -> list[dict]:
+# Maximum characters of assistant/user/system text sent to the TUI frontend.
+# Longer content is truncated for display — the full text is preserved in the
+# agent's in-memory history and the database.
+_DISPLAY_TEXT_MAX = 3000
+
+# Maximum number of display messages returned to the frontend on session.resume
+# and session.history.  Older messages stay in the DB; the agent still loads
+# the full history for its reasoning context.
+_DISPLAY_MSG_LIMIT = 150
+
+
+def _history_to_messages(history: list[dict], limit: int | None = None) -> list[dict]:
     messages = []
     tool_call_args = {}
 
@@ -1136,8 +1147,13 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             continue
         if not (m.get("content") or "").strip():
             continue
-        messages.append({"role": role, "text": m.get("content") or ""})
+        text = m.get("content") or ""
+        if len(text) > _DISPLAY_TEXT_MAX:
+            text = text[:_DISPLAY_TEXT_MAX] + f"\n…[{len(text) - _DISPLAY_TEXT_MAX} chars truncated for display]"
+        messages.append({"role": role, "text": text})
 
+    if limit is not None and len(messages) > limit:
+        messages = messages[-limit:]
     return messages
 
 
@@ -1293,7 +1309,7 @@ def _(rid, params: dict) -> dict:
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
-        messages = _history_to_messages(history)
+        messages = _history_to_messages(history, limit=_DISPLAY_MSG_LIMIT)
         tokens = _set_session_context(target)
         try:
             agent = _make_agent(sid, target, session_id=target)
@@ -1342,7 +1358,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "count": len(session.get("history", [])),
-            "messages": _history_to_messages(list(session.get("history", []))),
+            "messages": _history_to_messages(list(session.get("history", [])), limit=_DISPLAY_MSG_LIMIT),
         },
     )
 

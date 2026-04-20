@@ -1169,7 +1169,7 @@ class SlashCommandCompleter(Completer):
                         name,
                         start_position=-len(sub_text),
                         display=name,
-                        display_meta=f"{identity.vendor}/{identity.family}",
+                        display_meta=f"{identity.family} · {identity.vendor}",
                     )
         except Exception:
             pass
