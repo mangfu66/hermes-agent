@@ -178,6 +178,7 @@ def _fixed_temperature_for_model(
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
 _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "gemini": "gemini-3-flash-preview",
+    "google-gemini-cli": "gemini-3-flash-preview",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
     "kimi-coding-cn": "kimi-k2-turbo-preview",
@@ -1700,6 +1701,7 @@ def resolve_provider_client(
             PROVIDER_REGISTRY,
             resolve_api_key_provider_credentials,
             resolve_external_process_provider_credentials,
+            resolve_gemini_oauth_runtime_credentials,
         )
     except ImportError:
         logger.debug("hermes_cli.auth not available for provider %s", provider)
@@ -1818,11 +1820,26 @@ def resolve_provider_client(
         return None, None
 
     elif pconfig.auth_type in ("oauth_device_code", "oauth_external"):
-        # OAuth providers — route through their specific try functions
+        # OAuth providers — route through their specific runtime adapters.
         if provider == "nous":
             return resolve_provider_client("nous", model, async_mode)
         if provider == "openai-codex":
             return resolve_provider_client("openai-codex", model, async_mode)
+        if provider == "google-gemini-cli":
+            creds = resolve_gemini_oauth_runtime_credentials()
+            api_key = str(creds.get("api_key", "")).strip()
+            base_url = str(creds.get("base_url", "")).strip() or "cloudcode-pa://google"
+            if not api_key:
+                logger.warning("resolve_provider_client: google-gemini-cli requested but no OAuth token was resolved")
+                return None, None
+            final_model = _normalize_resolved_model(
+                model or _API_KEY_PROVIDER_AUX_MODELS.get("google-gemini-cli", "") or _read_main_model() or "gemini-3-flash-preview",
+                provider,
+            )
+            from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
+            client = GeminiCloudCodeClient(api_key=api_key, base_url=base_url)
+            logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
+            return (_to_async_client(client, final_model) if async_mode else (client, final_model))
         # Other OAuth providers not directly supported
         logger.warning("resolve_provider_client: OAuth provider %s not "
                        "directly supported, try 'auto'", provider)

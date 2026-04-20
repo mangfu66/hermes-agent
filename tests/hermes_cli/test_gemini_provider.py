@@ -277,6 +277,19 @@ class TestGeminiAgentInit:
             resolve_provider_client("gemini")
         mock_openai.assert_called_once()
 
+    def test_google_gemini_cli_resolve_provider_client_uses_oauth_runtime(self):
+        with patch(
+            "agent.auxiliary_client.resolve_gemini_oauth_runtime_credentials",
+            return_value={"api_key": "oauth-token", "base_url": "cloudcode-pa://google"},
+        ), patch("agent.gemini_cloudcode_adapter.GeminiCloudCodeClient") as mock_client:
+            mock_client.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_provider_client
+            resolve_provider_client("google-gemini-cli", model="gemini-2.5-flash")
+
+        mock_client.assert_called_once()
+        assert mock_client.call_args.kwargs["api_key"] == "oauth-token"
+        assert mock_client.call_args.kwargs["base_url"] == "cloudcode-pa://google"
+
 
 # ── models.dev Integration ──
 
