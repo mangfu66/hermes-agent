@@ -158,20 +158,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gemini-2.5-flash-lite",
     ],
     "google-antigravity": [
-        # Claude models available via Antigravity (urtal subscription)
-        "claude-opus-4-7-thinking",
-        "claude-opus-4-6-thinking",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5",
-        # Gemini models — high/low thinking tiers + standard
+        # Current visible antigravity catalog observed in product UI / live API
         "gemini-3.1-pro-high",
         "gemini-3.1-pro-low",
-        "gemini-3-pro-high",
-        "gemini-3-pro-low",
-        "gemini-3.1-flash",
         "gemini-3-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
     ],
     "claude-acp": [
         # Claude models via local `claude --acp --stdio` (Claude Code subscription)

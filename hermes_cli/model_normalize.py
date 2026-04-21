@@ -408,6 +408,20 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
             return bare
         return _normalize_for_deepseek(bare)
 
+    # --- Google Antigravity: keep current live ids canonical, repair a few
+    #     historical / display-name-ish aliases before validation/runtime. ---
+    if provider == "google-antigravity":
+        bare = _strip_matching_provider_prefix(name, provider)
+        lowered = bare.lower()
+        alias_map = {
+            "claude-sonnet-4-6-thinking": "claude-sonnet-4-6",
+            "claude-opus-4-6": "claude-opus-4-6-thinking",
+            "gemini-3-1-pro-high": "gemini-3.1-pro-high",
+            "gemini-3-1-pro-low": "gemini-3.1-pro-low",
+        }
+        mapped = alias_map.get(lowered)
+        return mapped or bare
+
     # --- Direct providers: repair matching provider prefixes only ---
     if provider in _MATCHING_PREFIX_STRIP_PROVIDERS:
         return _strip_matching_provider_prefix(name, provider)

@@ -23,6 +23,7 @@ from hermes_cli.auth import (
     resolve_codex_runtime_credentials,
     resolve_qwen_runtime_credentials,
     resolve_gemini_oauth_runtime_credentials,
+    resolve_antigravity_oauth_runtime_credentials,
     resolve_gemini_cli_process_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
@@ -838,14 +839,14 @@ def resolve_runtime_provider(
 
     if provider == "google-antigravity":
         try:
-            creds = resolve_gemini_oauth_runtime_credentials()
+            creds = resolve_antigravity_oauth_runtime_credentials()
             return {
                 "provider": "google-antigravity",
                 "api_mode": "chat_completions",
                 "base_url": creds.get("base_url", "") or "cloudcode-pa://google",
                 "api_key": creds.get("api_key", ""),
                 "ide_type": "ANTIGRAVITY",
-                "source": creds.get("source", "google-oauth"),
+                "source": creds.get("source", "google-antigravity-oauth"),
                 "expires_at_ms": creds.get("expires_at_ms"),
                 "email": creds.get("email", ""),
                 "project_id": creds.get("project_id", ""),

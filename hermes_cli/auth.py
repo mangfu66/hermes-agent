@@ -935,6 +935,11 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
             if google_oauth_path.exists():
                 google_oauth_path.unlink()
                 cleared = True
+        if target == "google-antigravity":
+            antigravity_oauth_path = get_hermes_home() / "auth" / "google_antigravity_oauth.json"
+            if antigravity_oauth_path.exists():
+                antigravity_oauth_path.unlink()
+                cleared = True
 
         if not cleared:
             return False
@@ -1342,56 +1347,83 @@ def get_qwen_auth_status() -> Dict[str, Any]:
 # Actual HTTP traffic goes to https://cloudcode-pa.googleapis.com/v1internal:*.
 # =============================================================================
 
-def resolve_gemini_oauth_runtime_credentials(
+def _resolve_google_oauth_runtime_credentials(
     *,
+    module_name: str,
+    provider_id: str,
+    provider_label: str,
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
-    """Resolve runtime OAuth creds for google-gemini-cli."""
     try:
-        from agent.google_oauth import (
-            GoogleOAuthError,
-            _credentials_path,
-            get_valid_access_token,
-            load_credentials,
-        )
+        oauth_mod = __import__(module_name, fromlist=[
+            "GoogleOAuthError",
+            "_credentials_path",
+            "get_valid_access_token",
+            "load_credentials",
+        ])
     except ImportError as exc:
         raise AuthError(
-            f"agent.google_oauth is not importable: {exc}",
-            provider="google-gemini-cli",
-            code="google_oauth_module_missing",
+            f"{module_name} is not importable: {exc}",
+            provider=provider_id,
+            code=f"{provider_label}_oauth_module_missing",
         ) from exc
 
     try:
-        access_token = get_valid_access_token(force_refresh=force_refresh)
-    except GoogleOAuthError as exc:
+        access_token = oauth_mod.get_valid_access_token(force_refresh=force_refresh)
+    except oauth_mod.GoogleOAuthError as exc:
         raise AuthError(
             str(exc),
-            provider="google-gemini-cli",
+            provider=provider_id,
             code=exc.code,
         ) from exc
 
-    creds = load_credentials()
-    base_url = DEFAULT_GEMINI_CLOUDCODE_BASE_URL
+    creds = oauth_mod.load_credentials()
     return {
-        "provider": "google-gemini-cli",
-        "base_url": base_url,
+        "provider": provider_id,
+        "base_url": DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
         "api_key": access_token,
-        "source": "google-oauth",
+        "source": provider_label,
         "expires_at_ms": (creds.expires_ms if creds else None),
-        "auth_file": str(_credentials_path()),
+        "auth_file": str(oauth_mod._credentials_path()),
         "email": (creds.email if creds else "") or "",
         "project_id": (creds.project_id if creds else "") or "",
     }
 
 
-def get_gemini_oauth_auth_status() -> Dict[str, Any]:
-    """Return a status dict for `hermes auth list` / `hermes status`."""
+def resolve_gemini_oauth_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Resolve runtime OAuth creds for google-gemini-cli."""
+    return _resolve_google_oauth_runtime_credentials(
+        module_name="agent.google_oauth",
+        provider_id="google-gemini-cli",
+        provider_label="google-oauth",
+        force_refresh=force_refresh,
+    )
+
+
+def resolve_antigravity_oauth_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Resolve runtime OAuth creds for google-antigravity."""
+    return _resolve_google_oauth_runtime_credentials(
+        module_name="agent.google_antigravity_oauth",
+        provider_id="google-antigravity",
+        provider_label="google-antigravity-oauth",
+        force_refresh=force_refresh,
+    )
+
+
+def _get_google_oauth_auth_status(*, module_name: str, source: str) -> Dict[str, Any]:
+    """Return a status dict for OAuth providers backed by a credentials file."""
     try:
-        from agent.google_oauth import _credentials_path, load_credentials
+        oauth_mod = __import__(module_name, fromlist=["_credentials_path", "load_credentials"])
     except ImportError:
-        return {"logged_in": False, "error": "agent.google_oauth unavailable"}
-    auth_path = _credentials_path()
-    creds = load_credentials()
+        return {"logged_in": False, "error": f"{module_name} unavailable"}
+    auth_path = oauth_mod._credentials_path()
+    creds = oauth_mod.load_credentials()
     if creds is None or not creds.access_token:
         return {
             "logged_in": False,
@@ -1401,12 +1433,25 @@ def get_gemini_oauth_auth_status() -> Dict[str, Any]:
     return {
         "logged_in": True,
         "auth_file": str(auth_path),
-        "source": "google-oauth",
+        "source": source,
         "api_key": creds.access_token,
         "expires_at_ms": creds.expires_ms,
         "email": creds.email,
         "project_id": creds.project_id,
     }
+
+
+def get_gemini_oauth_auth_status() -> Dict[str, Any]:
+    """Return a status dict for `hermes auth list` / `hermes status`."""
+    return _get_google_oauth_auth_status(module_name="agent.google_oauth", source="google-oauth")
+
+
+def get_antigravity_oauth_auth_status() -> Dict[str, Any]:
+    """Return auth status for google-antigravity."""
+    return _get_google_oauth_auth_status(
+        module_name="agent.google_antigravity_oauth",
+        source="google-antigravity-oauth",
+    )
 
 
 def resolve_gemini_cli_process_credentials() -> Dict[str, Any]:
@@ -2649,6 +2694,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_qwen_auth_status()
     if target == "google-gemini-cli":
         return get_gemini_oauth_auth_status()
+    if target == "google-antigravity":
+        return get_antigravity_oauth_auth_status()
     if target == "copilot-acp":
         return get_external_process_provider_status(target)
     # API-key providers
@@ -3090,6 +3137,37 @@ def login_command(args) -> None:
         if creds.get("email"):
             print(f"  Account: {creds['email']}")
         print(f"  Config updated: {config_path} (model.provider=google-gemini-cli)")
+        return
+
+    if provider_id == "google-antigravity":
+        from agent.google_antigravity_oauth import run_antigravity_oauth_login_pure
+        from hermes_cli.models import _PROVIDER_MODELS
+
+        print()
+        print("Signing in to Google Antigravity OAuth / Cloud Code Assist...")
+        print("This opens a browser login and stores credentials in ~/.hermes/auth/google_antigravity_oauth.json")
+        print()
+        creds = run_antigravity_oauth_login_pure()
+        default_model = None
+        antigravity_models = list(_PROVIDER_MODELS.get("google-antigravity") or [])
+        if antigravity_models:
+            default_model = antigravity_models[0]
+        config_path = _update_config_for_provider(
+            "google-antigravity",
+            DEFAULT_GEMINI_CLOUDCODE_BASE_URL,
+            default_model=default_model,
+        )
+        if default_model:
+            _save_model_choice(default_model)
+        print()
+        print("Login successful!")
+        from hermes_constants import display_hermes_home as _dhh
+        print(f"  Auth state: {_dhh()}/auth/google_antigravity_oauth.json")
+        if creds.get("project_id"):
+            print(f"  Project: {creds['project_id']}")
+        if creds.get("email"):
+            print(f"  Account: {creds['email']}")
+        print(f"  Config updated: {config_path} (model.provider=google-antigravity)")
         return
 
     print(f"Login for provider '{provider_id}' is not implemented yet.")

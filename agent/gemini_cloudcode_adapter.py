@@ -38,7 +38,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
-from agent import google_oauth
+from agent import google_oauth, google_antigravity_oauth
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 from agent.google_code_assist import (
     CODE_ASSIST_ENDPOINT,
@@ -51,10 +51,41 @@ from agent.google_code_assist import (
 
 logger = logging.getLogger(__name__)
 
+ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+ANTIGRAVITY_AUTOPUSH_ENDPOINT = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
+DEFAULT_ANTIGRAVITY_VERSION = "1.18.4"
+CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14"
 
-# =============================================================================
-# Request translation: OpenAI → Gemini
-# =============================================================================
+
+def _is_antigravity_mode(ide_type: str) -> bool:
+    return str(ide_type or "").strip().upper() == "ANTIGRAVITY"
+
+
+def _is_antigravity_claude_model(model: str) -> bool:
+    return str(model or "").strip().lower().startswith("claude-")
+
+
+def _antigravity_http_headers(model: str) -> Dict[str, str]:
+    version = str(os.getenv("HERMES_ANTIGRAVITY_VERSION", "") or "").strip() or DEFAULT_ANTIGRAVITY_VERSION
+    headers = {
+        "Accept": "text/event-stream",
+        "User-Agent": f"antigravity/{version} darwin/arm64",
+    }
+    if _is_antigravity_claude_model(model):
+        headers["anthropic-beta"] = CLAUDE_THINKING_BETA_HEADER
+    return headers
+
+
+def _oauth_module_for_ide(ide_type: str):
+    return google_antigravity_oauth if _is_antigravity_mode(ide_type) else google_oauth
+
+
+def _code_assist_endpoints_for_ide(ide_type: str) -> List[str]:
+    if _is_antigravity_mode(ide_type):
+        return [ANTIGRAVITY_DAILY_ENDPOINT, ANTIGRAVITY_AUTOPUSH_ENDPOINT]
+    return [CODE_ASSIST_ENDPOINT]
+
+
 
 _ROLE_MAP_OPENAI_TO_GEMINI = {
     "user": "user",
@@ -631,15 +662,16 @@ class GeminiCloudCodeClient:
         if self._project_context is not None:
             return self._project_context
 
-        env_project = google_oauth.resolve_project_id_from_env()
+        oauth_mod = _oauth_module_for_ide(self._ide_type)
+        env_project = oauth_mod.resolve_project_id_from_env()
 
         # ANTIGRAVITY uses a paid-tier project that may differ from the standard
         # OAuth project stored in credentials — skip the cache and always
         # discover fresh so Google assigns the correct tier/project.
         creds = None
         stored_project = ""
-        if self._ide_type != "ANTIGRAVITY":
-            creds = google_oauth.load_credentials()
+        if not _is_antigravity_mode(self._ide_type):
+            creds = oauth_mod.load_credentials()
             stored_project = creds.project_id if creds else ""
 
         # Prefer what's already baked into the creds (standard tier only)
@@ -662,7 +694,7 @@ class GeminiCloudCodeClient:
         # Persist discovered project back to the creds file so the next
         # session doesn't re-run the discovery.
         if ctx.project_id or ctx.managed_project_id:
-            google_oauth.update_project_ids(
+            oauth_mod.update_project_ids(
                 project_id=ctx.project_id,
                 managed_project_id=ctx.managed_project_id,
             )
@@ -685,7 +717,8 @@ class GeminiCloudCodeClient:
         timeout: Any = None,
         **_: Any,
     ) -> Any:
-        access_token = google_oauth.get_valid_access_token()
+        oauth_mod = _oauth_module_for_ide(self._ide_type)
+        access_token = oauth_mod.get_valid_access_token()
         ctx = self._ensure_project_context(access_token, model)
 
         thinking_config = None
@@ -707,6 +740,10 @@ class GeminiCloudCodeClient:
             model=model,
             inner_request=inner,
         )
+        if _is_antigravity_mode(self._ide_type):
+            wrapped["requestType"] = "agent"
+            wrapped["userAgent"] = "antigravity"
+            wrapped["requestId"] = f"agent-{int(time.time() * 1000)}-{uuid.uuid4().hex[:9]}"
 
         headers = {
             "Content-Type": "application/json",
@@ -714,13 +751,27 @@ class GeminiCloudCodeClient:
             "Authorization": f"Bearer {access_token}",
             "User-Agent": build_gemini_cli_user_agent(model),
         }
+        if _is_antigravity_mode(self._ide_type):
+            headers.update(_antigravity_http_headers(model))
         headers.update(self._default_headers)
 
         if stream:
             return self._stream_completion(model=model, wrapped=wrapped, headers=headers)
 
-        url = f"{CODE_ASSIST_ENDPOINT}/v1internal:generateContent"
-        response = self._http.post(url, json=wrapped, headers=headers)
+        endpoints = _code_assist_endpoints_for_ide(self._ide_type)
+        last_response = None
+        for endpoint in endpoints:
+            url = f"{endpoint}/v1internal:generateContent"
+            response = self._http.post(url, json=wrapped, headers=headers)
+            last_response = response
+            if response.status_code == 200:
+                break
+            if response.status_code in {403, 404} and endpoint != endpoints[-1]:
+                continue
+            break
+        response = last_response
+        if response is None:
+            raise CodeAssistError("No Code Assist endpoint available", code="code_assist_endpoint_missing")
         if response.status_code != 200:
             raise _gemini_http_error(response)
         try:
@@ -740,26 +791,38 @@ class GeminiCloudCodeClient:
         headers: Dict[str, str],
     ) -> Iterator[_GeminiStreamChunk]:
         """Generator that yields OpenAI-shaped streaming chunks."""
-        url = f"{CODE_ASSIST_ENDPOINT}/v1internal:streamGenerateContent?alt=sse"
+        endpoints = _code_assist_endpoints_for_ide(self._ide_type)
         stream_headers = dict(headers)
-        stream_headers["Accept"] = "text/event-stream"
+        stream_headers["Accept"] = headers.get("Accept", "text/event-stream")
 
         def _generator() -> Iterator[_GeminiStreamChunk]:
-            try:
-                with self._http.stream("POST", url, json=wrapped, headers=stream_headers) as response:
-                    if response.status_code != 200:
-                        # Materialize error body for better diagnostics
-                        response.read()
-                        raise _gemini_http_error(response)
-                    tool_call_counter: List[int] = [0]
-                    for event in _iter_sse_events(response):
-                        for chunk in _translate_stream_event(event, model, tool_call_counter):
-                            yield chunk
-            except httpx.HTTPError as exc:
-                raise CodeAssistError(
-                    f"Streaming request failed: {exc}",
-                    code="code_assist_stream_error",
-                ) from exc
+            last_exc = None
+            for endpoint in endpoints:
+                url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
+                try:
+                    with self._http.stream("POST", url, json=wrapped, headers=stream_headers) as response:
+                        if response.status_code != 200:
+                            response.read()
+                            err = _gemini_http_error(response)
+                            last_exc = err
+                            if response.status_code in {403, 404} and endpoint != endpoints[-1]:
+                                continue
+                            raise err
+                        tool_call_counter: List[int] = [0]
+                        for event in _iter_sse_events(response):
+                            for chunk in _translate_stream_event(event, model, tool_call_counter):
+                                yield chunk
+                        return
+                except httpx.HTTPError as exc:
+                    last_exc = CodeAssistError(
+                        f"Streaming request failed: {exc}",
+                        code="code_assist_stream_error",
+                    )
+                    if endpoint == endpoints[-1]:
+                        raise last_exc from exc
+                    continue
+            if last_exc is not None:
+                raise last_exc
 
         return _generator()
 

@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from hermes_cli.auth import PROVIDER_REGISTRY, resolve_provider, resolve_api_key_provider_credentials
-from hermes_cli.models import _PROVIDER_MODELS, _PROVIDER_LABELS, _PROVIDER_ALIASES, normalize_provider
+from hermes_cli.models import _PROVIDER_MODELS, _PROVIDER_LABELS, _PROVIDER_ALIASES, normalize_provider, validate_requested_model
 from hermes_cli.model_normalize import normalize_model_for_provider, detect_vendor
 from agent.model_metadata import get_model_context_length
 from agent.models_dev import PROVIDER_TO_MODELS_DEV, list_agentic_models, _NOISE_PATTERNS
@@ -125,6 +125,21 @@ class TestGeminiCredentials:
 # ── Model Catalog ──
 
 class TestGeminiModelCatalog:
+    def test_antigravity_models_match_live_six_model_catalog(self):
+        assert _PROVIDER_MODELS["google-antigravity"] == [
+            "gemini-3.1-pro-high",
+            "gemini-3.1-pro-low",
+            "gemini-3-flash",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+        ]
+
+    def test_validate_requested_model_rejects_removed_antigravity_opus_non_thinking(self):
+        result = validate_requested_model("claude-opus-4-6", provider="google-antigravity")
+        assert result["accepted"] is False
+        assert result["recognized"] is False
+
     def test_provider_models_exist(self):
         assert "gemini" in _PROVIDER_MODELS
         models = _PROVIDER_MODELS["gemini"]
@@ -170,6 +185,11 @@ class TestGeminiModelNormalization:
 # ── Context Length ──
 
 class TestGeminiContextLength:
+    def test_context_length_uses_antigravity_provider_overrides(self):
+        assert get_model_context_length("claude-opus-4-6-thinking", provider="google-antigravity") == 200000
+        assert get_model_context_length("claude-sonnet-4-6", provider="google-antigravity") == 200000
+        assert get_model_context_length("gpt-oss-120b-medium", provider="google-antigravity") == 131072
+
     def test_gemma_4_31b_context(self):
         # Mock external API lookups to test against hardcoded defaults
         # (models.dev and OpenRouter may return different values like 262144).

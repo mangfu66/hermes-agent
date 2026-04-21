@@ -95,6 +95,19 @@ DEFAULT_FALLBACK_CONTEXT = CONTEXT_PROBE_TIERS[0]
 # Sessions, model switches, and cron jobs should reject models below this.
 MINIMUM_CONTEXT_LENGTH = 64_000
 
+# Provider-specific hard overrides when a provider reuses another vendor's raw
+# model IDs but exposes different real context windows (e.g. Antigravity Claude).
+_PROVIDER_CONTEXT_LENGTHS: Dict[str, Dict[str, int]] = {
+    "google-antigravity": {
+        "claude-opus-4-6-thinking": 200000,
+        "claude-sonnet-4-6": 200000,
+        "gemini-3.1-pro-high": 1048576,
+        "gemini-3.1-pro-low": 1048576,
+        "gemini-3-flash": 1048576,
+        "gpt-oss-120b-medium": 131072,
+    },
+}
+
 # Thin fallback defaults — only broad model family patterns.
 # These fire only when provider is unknown AND models.dev/OpenRouter/Anthropic
 # all miss. Replaced the previous 80+ entry dict.
@@ -986,6 +999,13 @@ def get_model_context_length(
     # "model-name") so cache lookups and server queries use the bare ID that
     # local servers actually know about.  Ollama "model:tag" colons are preserved.
     model = _strip_provider_prefix(model)
+
+    # 1. Provider-specific hard overrides
+    provider_overrides = _PROVIDER_CONTEXT_LENGTHS.get((provider or "").strip().lower())
+    if provider_overrides:
+        override = provider_overrides.get(model.lower())
+        if override:
+            return override
 
     # 1. Check persistent cache (model+provider)
     if base_url:

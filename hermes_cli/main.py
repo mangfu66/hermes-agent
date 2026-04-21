@@ -6757,7 +6757,7 @@ For more help on a command:
     )
     login_parser.add_argument(
         "--provider",
-        choices=["nous", "openai-codex", "google-gemini-cli"],
+        choices=["nous", "openai-codex", "google-gemini-cli", "google-antigravity"],
         default=None,
         help="Provider to authenticate with (default: nous)",
     )
@@ -6803,7 +6803,7 @@ For more help on a command:
     )
     logout_parser.add_argument(
         "--provider",
-        choices=["nous", "openai-codex", "google-gemini-cli"],
+        choices=["nous", "openai-codex", "google-gemini-cli", "google-antigravity"],
         default=None,
         help="Provider to log out from (default: active provider)",
     )

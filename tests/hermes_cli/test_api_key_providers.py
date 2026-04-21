@@ -4,6 +4,9 @@ import os
 
 import pytest
 
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
 from hermes_cli.auth import (
     PROVIDER_REGISTRY,
     ProviderConfig,
@@ -13,6 +16,7 @@ from hermes_cli.auth import (
     get_external_process_provider_status,
     resolve_external_process_provider_credentials,
     get_auth_status,
+    resolve_antigravity_oauth_runtime_credentials,
     AuthError,
     KIMI_CODE_BASE_URL,
     _resolve_kimi_base_url,
@@ -23,6 +27,37 @@ from hermes_cli.copilot_auth import _try_gh_cli_token
 # =============================================================================
 # Provider Registry tests
 # =============================================================================
+
+class TestAntigravityOAuth:
+    def test_resolve_antigravity_oauth_runtime_credentials_uses_dedicated_module(self):
+        fake_creds = MagicMock(expires_ms=123456789, email='boss@example.com', project_id='proj-antigravity')
+        with patch('agent.google_antigravity_oauth.get_valid_access_token', return_value='ya29.antigravity'), \
+             patch('agent.google_antigravity_oauth.load_credentials', return_value=fake_creds), \
+             patch('agent.google_antigravity_oauth._credentials_path', return_value=Path('/tmp/google_antigravity_oauth.json')):
+            resolved = resolve_antigravity_oauth_runtime_credentials()
+        assert resolved['provider'] == 'google-antigravity'
+        assert resolved['api_key'] == 'ya29.antigravity'
+        assert resolved['project_id'] == 'proj-antigravity'
+        assert resolved['auth_file'] == '/tmp/google_antigravity_oauth.json'
+
+    def test_runtime_google_antigravity_uses_antigravity_oauth_runtime(self):
+        with patch('hermes_cli.runtime_provider.resolve_antigravity_oauth_runtime_credentials', return_value={
+            'provider': 'google-antigravity',
+            'api_key': 'ya29.antigravity',
+            'base_url': 'cloudcode-pa://google',
+            'source': 'google-antigravity-oauth',
+            'expires_at_ms': 123,
+            'email': 'boss@example.com',
+            'project_id': 'proj-antigravity',
+        }):
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            resolved = resolve_runtime_provider(requested='google-antigravity')
+        assert resolved['provider'] == 'google-antigravity'
+        assert resolved['api_key'] == 'ya29.antigravity'
+        assert resolved['source'] == 'google-antigravity-oauth'
+        assert resolved['project_id'] == 'proj-antigravity'
+        assert resolved['ide_type'] == 'ANTIGRAVITY'
+
 
 class TestProviderRegistry:
     """Test that new providers are correctly registered."""
