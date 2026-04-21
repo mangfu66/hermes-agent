@@ -610,6 +610,7 @@ class TestBuildGeminiRequest:
         model_turn = req["contents"][1]
         assert model_turn["role"] == "model"
         fc_part = next(p for p in model_turn["parts"] if "functionCall" in p)
+        assert fc_part["functionCall"]["id"] == "call_1"
         assert fc_part["functionCall"]["name"] == "get_weather"
         assert fc_part["functionCall"]["args"] == {"city": "SF"}
 
@@ -632,6 +633,7 @@ class TestBuildGeminiRequest:
         # Last content turn should carry functionResponse
         last = req["contents"][-1]
         fr_part = next(p for p in last["parts"] if "functionResponse" in p)
+        assert fr_part["functionResponse"]["id"] == "c1"
         assert fr_part["functionResponse"]["name"] == "get_weather"
         assert fr_part["functionResponse"]["response"] == {"temp": 72}
 

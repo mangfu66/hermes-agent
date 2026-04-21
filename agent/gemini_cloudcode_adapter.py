@@ -159,8 +159,10 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         args = {"_raw": args_raw}
     if not isinstance(args, dict):
         args = {"_value": args}
+    call_id = str(tool_call.get("id") or "").strip() or f"call_{uuid.uuid4().hex[:12]}"
     return {
         "functionCall": {
+            "id": call_id,
             "name": fn.get("name") or "",
             "args": args,
         },
@@ -174,12 +176,12 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
     """OpenAI tool-role message -> Gemini functionResponse part.
 
-    The function name isn't in the OpenAI tool message directly; it must be
-    passed via the assistant message that issued the call. For simplicity we
-    look up ``name`` on the message (OpenAI SDK copies it there) or on the
-    ``tool_call_id`` cross-reference.
+    Preserve both the function name and the originating tool-call ID so Claude
+    backends behind Antigravity can reconstruct Anthropic's ``tool_result``
+    shape (which requires ``tool_use_id``).
     """
-    name = str(message.get("name") or message.get("tool_call_id") or "tool")
+    name = str(message.get("name") or "tool")
+    tool_use_id = str(message.get("tool_call_id") or "").strip()
     content = _coerce_content_to_text(message.get("content"))
     # Gemini expects the response as a dict under `response`. We wrap plain
     # text in {"output": "..."}.
@@ -188,12 +190,15 @@ def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
     except json.JSONDecodeError:
         parsed = None
     response = parsed if isinstance(parsed, dict) else {"output": content}
-    return {
+    payload = {
         "functionResponse": {
             "name": name,
             "response": response,
         },
     }
+    if tool_use_id:
+        payload["functionResponse"]["id"] = tool_use_id
+    return payload
 
 
 def _build_gemini_contents(
