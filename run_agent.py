@@ -124,7 +124,7 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
-from utils import atomic_json_write, env_var_enabled
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled
 
 
 
@@ -703,6 +703,7 @@ class AIAgent:
     def base_url(self, value: str) -> None:
         self._base_url = value
         self._base_url_lower = value.lower() if value else ""
+        self._base_url_hostname = base_url_hostname(value)
 
     def __init__(
         self,
@@ -844,13 +845,16 @@ class AIAgent:
             self.api_mode = "codex_responses"
         elif self.provider == "xai":
             self.api_mode = "codex_responses"
-        elif (provider_name is None) and "chatgpt.com/backend-api/codex" in self._base_url_lower:
+        elif (provider_name is None) and (
+            self._base_url_hostname == "chatgpt.com"
+            and "/backend-api/codex" in self._base_url_lower
+        ):
             self.api_mode = "codex_responses"
             self.provider = "openai-codex"
-        elif (provider_name is None) and "api.x.ai" in self._base_url_lower:
+        elif (provider_name is None) and self._base_url_hostname == "api.x.ai":
             self.api_mode = "codex_responses"
             self.provider = "xai"
-        elif self.provider == "anthropic" or (provider_name is None and "api.anthropic.com" in self._base_url_lower):
+        elif self.provider == "anthropic" or (provider_name is None and self._base_url_hostname == "api.anthropic.com"):
             self.api_mode = "anthropic_messages"
             self.provider = "anthropic"
         elif self._base_url_lower.rstrip("/").endswith("/anthropic"):
@@ -858,8 +862,12 @@ class AIAgent:
             # use a URL convention ending in /anthropic. Auto-detect these so the
             # Anthropic Messages API adapter is used instead of chat completions.
             self.api_mode = "anthropic_messages"
-        elif self.provider == "bedrock" or "bedrock-runtime" in self._base_url_lower:
-            # AWS Bedrock — auto-detect from provider name or base URL.
+        elif self.provider == "bedrock" or (
+            self._base_url_hostname.startswith("bedrock-runtime.")
+            and base_url_host_matches(self._base_url_lower, "amazonaws.com")
+        ):
+            # AWS Bedrock — auto-detect from provider name or base URL
+            # (bedrock-runtime.<region>.amazonaws.com).
             self.api_mode = "bedrock_converse"
         else:
             self.api_mode = "chat_completions"
@@ -1080,8 +1088,7 @@ class AIAgent:
             _is_bedrock_anthropic = self.provider == "bedrock"
             if _is_bedrock_anthropic:
                 from agent.anthropic_adapter import build_anthropic_bedrock_client
-                import re as _re
-                _region_match = _re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
+                _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
                 _br_region = _region_match.group(1) if _region_match else "us-east-1"
                 self._bedrock_region = _br_region
                 self._anthropic_client = build_anthropic_bedrock_client(_br_region)
@@ -1122,8 +1129,7 @@ class AIAgent:
         elif self.api_mode == "bedrock_converse":
             # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
             # Region is extracted from the base_url or defaults to us-east-1.
-            import re as _re
-            _region_match = _re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
+            _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
             self._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
             # Guardrail config — read from config.yaml at init time.
             self._bedrock_guardrail_config = None
@@ -1159,23 +1165,23 @@ class AIAgent:
                     if self.acp_args:
                         client_kwargs["args"] = self.acp_args
                 effective_base = base_url
-                if "openrouter" in effective_base.lower():
+                if base_url_host_matches(effective_base, "openrouter.ai"):
                     client_kwargs["default_headers"] = {
                         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
                         "X-OpenRouter-Title": "Hermes Agent",
                         "X-OpenRouter-Categories": "productivity,cli-agent",
                     }
-                elif "api.githubcopilot.com" in effective_base.lower():
+                elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
                     from hermes_cli.models import copilot_default_headers
 
                     client_kwargs["default_headers"] = copilot_default_headers()
-                elif "api.kimi.com" in effective_base.lower():
+                elif base_url_host_matches(effective_base, "api.kimi.com"):
                     client_kwargs["default_headers"] = {
                         "User-Agent": "KimiCLI/1.30.0",
                     }
-                elif "portal.qwen.ai" in effective_base.lower():
+                elif base_url_host_matches(effective_base, "portal.qwen.ai"):
                     client_kwargs["default_headers"] = _qwen_portal_headers()
-                elif "chatgpt.com" in effective_base.lower():
+                elif base_url_host_matches(effective_base, "chatgpt.com"):
                     from agent.auxiliary_client import _codex_cloudflare_headers
                     client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
             else:
@@ -1231,7 +1237,7 @@ class AIAgent:
             # stream tool call arguments token-by-token, keeping the
             # connection alive.
             _effective_base = str(client_kwargs.get("base_url", "")).lower()
-            if "openrouter" in _effective_base and "claude" in (self.model or "").lower():
+            if base_url_host_matches(_effective_base, "openrouter.ai") and "claude" in (self.model or "").lower():
                 headers = client_kwargs.get("default_headers") or {}
                 existing_beta = headers.get("x-anthropic-beta", "")
                 _FINE_GRAINED = "fine-grained-tool-streaming-2025-05-14"
@@ -1449,11 +1455,10 @@ class AIAgent:
                     if _mp and _mp.is_available():
                         self._memory_manager.add_provider(_mp)
                     if self._memory_manager.providers:
-                        from hermes_constants import get_hermes_home as _ghh
                         _init_kwargs = {
                             "session_id": self.session_id,
                             "platform": platform or "cli",
-                            "hermes_home": str(_ghh()),
+                            "hermes_home": str(get_hermes_home()),
                             "agent_context": "primary",
                         }
                         # Thread session title for memory provider scoping
@@ -1570,7 +1575,6 @@ class AIAgent:
                     "Falling back to auto-detection.",
                     _config_context_length,
                 )
-                import sys
                 print(
                     f"\n⚠ Invalid model.context_length in config.yaml: {_config_context_length!r}\n"
                     f"  Must be a plain integer (e.g. 256000, not '256K').\n"
@@ -1612,7 +1616,6 @@ class AIAgent:
                                         "Falling back to auto-detection.",
                                         self.model, _cp_ctx,
                                     )
-                                    import sys
                                     print(
                                         f"\n⚠ Invalid context_length for model {self.model!r} in custom_providers: {_cp_ctx!r}\n"
                                         f"  Must be a plain integer (e.g. 256000, not '256K').\n"
@@ -1768,7 +1771,7 @@ class AIAgent:
                 logger.debug("Invalid ollama_num_ctx config value: %r", _ollama_num_ctx_override)
         if self._ollama_num_ctx is None and self.base_url and is_local_endpoint(self.base_url):
             try:
-                _detected = query_ollama_num_ctx(self.model, self.base_url)
+                _detected = query_ollama_num_ctx(self.model, self.base_url, api_key=self.api_key or "")
                 if _detected and _detected > 0:
                     self._ollama_num_ctx = _detected
             except Exception as exc:
@@ -1875,8 +1878,6 @@ class AIAgent:
         change persists across turns (unlike fallback which is
         turn-scoped).
         """
-        import logging
-        import re as _re
         from hermes_cli.providers import determine_api_mode
 
         # ── Determine api_mode if not provided ──
@@ -1894,7 +1895,7 @@ class AIAgent:
             and isinstance(base_url, str)
             and base_url
         ):
-            base_url = _re.sub(r"/v1/?$", "", base_url)
+            base_url = re.sub(r"/v1/?$", "", base_url)
 
         old_model = self.model
         old_provider = self.provider
@@ -2261,8 +2262,13 @@ class AIAgent:
 
     def _is_direct_openai_url(self, base_url: str = None) -> bool:
         """Return True when a base URL targets OpenAI's native API."""
-        url = (base_url or self._base_url_lower).lower()
-        return "api.openai.com" in url and "openrouter" not in url
+        if base_url is not None:
+            hostname = base_url_hostname(base_url)
+        else:
+            hostname = getattr(self, "_base_url_hostname", "") or base_url_hostname(
+                getattr(self, "_base_url_lower", "")
+            )
+        return hostname == "api.openai.com"
 
     def _resolved_api_call_timeout(self) -> float:
         """Resolve the effective per-call request timeout in seconds.
@@ -2324,7 +2330,7 @@ class AIAgent:
 
     def _is_openrouter_url(self) -> bool:
         """Return True when the base URL targets OpenRouter."""
-        return "openrouter" in self._base_url_lower
+        return base_url_host_matches(self._base_url_lower, "openrouter.ai")
 
     def _anthropic_prompt_cache_policy(
         self,
@@ -2359,11 +2365,11 @@ class AIAgent:
 
         base_lower = eff_base_url.lower()
         is_claude = "claude" in eff_model.lower()
-        is_openrouter = "openrouter" in base_lower
+        is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
         is_anthropic_wire = eff_api_mode == "anthropic_messages"
         is_native_anthropic = (
             is_anthropic_wire
-            and (eff_provider == "anthropic" or "api.anthropic.com" in base_lower)
+            and (eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com")
         )
 
         if is_native_anthropic:
@@ -2772,10 +2778,10 @@ class AIAgent:
             prompt = self._SKILL_REVIEW_PROMPT
 
         def _run_review():
-            import contextlib, os as _os
+            import contextlib
             review_agent = None
             try:
-                with open(_os.devnull, "w") as _devnull, \
+                with open(os.devnull, "w") as _devnull, \
                      contextlib.redirect_stdout(_devnull), \
                      contextlib.redirect_stderr(_devnull):
                     review_agent = AIAgent(
@@ -2905,7 +2911,7 @@ class AIAgent:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
                 tool_calls_data = None
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
                         {"name": tc.function.name, "arguments": tc.function.arguments}
                         for tc in msg.tool_calls
@@ -3171,15 +3177,14 @@ class AIAgent:
         <title> tag instead of dumping raw HTML.  Falls back to a truncated
         str(error) for everything else.
         """
-        import re as _re
         raw = str(error)
 
         # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
         if "<!DOCTYPE" in raw or "<html" in raw:
-            m = _re.search(r"<title[^>]*>([^<]+)</title>", raw, _re.IGNORECASE)
+            m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.IGNORECASE)
             title = m.group(1).strip() if m else "HTML error page (title not found)"
             # Also grab Cloudflare Ray ID if present
-            ray = _re.search(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>", raw)
+            ray = re.search(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>", raw)
             ray_id = ray.group(1).strip() if ray else None
             status_code = getattr(error, "status_code", None)
             parts = []
@@ -3672,7 +3677,7 @@ class AIAgent:
                 existing = getattr(self, "_pending_steer", None)
                 self._pending_steer = (existing + "\n" + steer_text) if existing else steer_text
             return
-        marker = f"\n\n[USER STEER (injected mid-run, not tool output): {steer_text}]"
+        marker = f"\n\nUser guidance: {steer_text}"
         existing_content = messages[target_idx].get("content", "")
         if not isinstance(existing_content, str):
             # Anthropic multimodal content blocks — preserve them and append
@@ -3848,14 +3853,12 @@ class AIAgent:
 
         # 2. Clean terminal sandbox environments
         try:
-            from tools.terminal_tool import cleanup_vm
             cleanup_vm(task_id)
         except Exception:
             pass
 
         # 3. Clean browser daemon sessions
         try:
-            from tools.browser_tool import cleanup_browser
             cleanup_browser(task_id)
         except Exception:
             pass
@@ -5034,20 +5037,21 @@ class AIAgent:
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
-        from agent.auxiliary_client import _OR_HEADERS
+        from agent.auxiliary_client import _AI_GATEWAY_HEADERS, _OR_HEADERS
 
-        normalized = (base_url or "").lower()
-        if "openrouter" in normalized:
+        if base_url_host_matches(base_url, "openrouter.ai"):
             self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
-        elif "api.githubcopilot.com" in normalized:
+        elif base_url_host_matches(base_url, "ai-gateway.vercel.sh"):
+            self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
+        elif base_url_host_matches(base_url, "api.githubcopilot.com"):
             from hermes_cli.models import copilot_default_headers
 
             self._client_kwargs["default_headers"] = copilot_default_headers()
-        elif "api.kimi.com" in normalized:
+        elif base_url_host_matches(base_url, "api.kimi.com"):
             self._client_kwargs["default_headers"] = {"User-Agent": "KimiCLI/1.30.0"}
-        elif "portal.qwen.ai" in normalized:
+        elif base_url_host_matches(base_url, "portal.qwen.ai"):
             self._client_kwargs["default_headers"] = _qwen_portal_headers()
-        elif "chatgpt.com" in normalized:
+        elif base_url_host_matches(base_url, "chatgpt.com"):
             from agent.auxiliary_client import _codex_cloudflare_headers
             self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
@@ -6195,7 +6199,10 @@ class AIAgent:
                 # provider-specific exceptions like Copilot gpt-5-mini on
                 # chat completions.
                 fb_api_mode = "codex_responses"
-            elif fb_provider == "bedrock" or "bedrock-runtime" in fb_base_url.lower():
+            elif fb_provider == "bedrock" or (
+                base_url_hostname(fb_base_url).startswith("bedrock-runtime.")
+                and base_url_host_matches(fb_base_url, "amazonaws.com")
+            ):
                 fb_api_mode = "bedrock_converse"
 
             old_model = self.model
@@ -6628,7 +6635,7 @@ class AIAgent:
 
     def _is_qwen_portal(self) -> bool:
         """Return True when the base URL targets Qwen Portal."""
-        return "portal.qwen.ai" in self._base_url_lower
+        return base_url_host_matches(self._base_url_lower, "portal.qwen.ai")
 
     def _qwen_prepare_chat_messages(self, api_messages: list) -> list:
         prepared = copy.deepcopy(api_messages)
@@ -6749,12 +6756,15 @@ class AIAgent:
                 instructions = DEFAULT_AGENT_IDENTITY
 
             is_github_responses = (
-                "models.github.ai" in self.base_url.lower()
-                or "api.githubcopilot.com" in self.base_url.lower()
+                base_url_host_matches(self.base_url, "models.github.ai")
+                or base_url_host_matches(self.base_url, "api.githubcopilot.com")
             )
             is_codex_backend = (
                 self.provider == "openai-codex"
-                or "chatgpt.com/backend-api/codex" in self.base_url.lower()
+                or (
+                    self._base_url_hostname == "chatgpt.com"
+                    and "/backend-api/codex" in self._base_url_lower
+                )
             )
 
             # Resolve reasoning effort: config > default (medium)
@@ -6785,7 +6795,7 @@ class AIAgent:
             if not is_github_responses:
                 kwargs["prompt_cache_key"] = self.session_id
 
-            is_xai_responses = self.provider == "xai" or "api.x.ai" in (self.base_url or "").lower()
+            is_xai_responses = self.provider == "xai" or self._base_url_hostname == "api.x.ai"
 
             if reasoning_enabled and is_xai_responses:
                 # xAI reasons automatically — no effort param, just include encrypted content
@@ -6960,8 +6970,8 @@ class AIAgent:
 
         _is_openrouter = self._is_openrouter_url()
         _is_github_models = (
-            "models.github.ai" in self._base_url_lower
-            or "api.githubcopilot.com" in self._base_url_lower
+            base_url_host_matches(self._base_url_lower, "models.github.ai")
+            or base_url_host_matches(self._base_url_lower, "api.githubcopilot.com")
         )
 
         # Provider preferences (only, ignore, order, sort) are OpenRouter-
@@ -7037,11 +7047,14 @@ class AIAgent:
         Some providers/routes reject `reasoning` with 400s, so gate it to
         known reasoning-capable model families and direct Nous Portal.
         """
-        if "nousresearch" in self._base_url_lower:
+        if base_url_host_matches(self._base_url_lower, "nousresearch.com"):
             return True
-        if "ai-gateway.vercel.sh" in self._base_url_lower:
+        if base_url_host_matches(self._base_url_lower, "ai-gateway.vercel.sh"):
             return True
-        if "models.github.ai" in self._base_url_lower or "api.githubcopilot.com" in self._base_url_lower:
+        if (
+            base_url_host_matches(self._base_url_lower, "models.github.ai")
+            or base_url_host_matches(self._base_url_lower, "api.githubcopilot.com")
+        ):
             try:
                 from hermes_cli.models import github_model_reasoning_efforts
 
@@ -7806,8 +7819,7 @@ class AIAgent:
             # the tool returns True on the next poll.
             if self._interrupt_requested:
                 try:
-                    from tools.interrupt import set_interrupt as _sif
-                    _sif(True, _worker_tid)
+                    _set_interrupt(True, _worker_tid)
                 except Exception:
                     pass
             # Set the activity callback on THIS worker thread so
@@ -7838,8 +7850,7 @@ class AIAgent:
             with self._tool_worker_threads_lock:
                 self._tool_worker_threads.discard(_worker_tid)
             try:
-                from tools.interrupt import set_interrupt as _sif
-                _sif(False, _worker_tid)
+                _set_interrupt(False, _worker_tid)
             except Exception:
                 pass
 
@@ -8983,6 +8994,56 @@ class AIAgent:
                     and "skill_manage" in self.valid_tool_names):
                 self._iters_since_skill += 1
             
+            # ── Pre-API-call /steer drain ──────────────────────────────────
+            # If a /steer arrived during the previous API call (while the model
+            # was thinking), drain it now — before we build api_messages — so
+            # the model sees the steer text on THIS iteration.  Without this,
+            # steers sent during an API call only land after the NEXT tool batch,
+            # which may never come if the model returns a final response.
+            #
+            # We scan backwards for the last tool-role message in the messages
+            # list.  If found, the steer is appended there.  If not (first
+            # iteration, no tools yet), the steer stays pending for the next
+            # tool batch — injecting into a user message would break role
+            # alternation, and there's no tool output to piggyback on.
+            _pre_api_steer = self._drain_pending_steer()
+            if _pre_api_steer:
+                _injected = False
+                for _si in range(len(messages) - 1, -1, -1):
+                    _sm = messages[_si]
+                    if isinstance(_sm, dict) and _sm.get("role") == "tool":
+                        marker = f"\n\nUser guidance: {_pre_api_steer}"
+                        existing = _sm.get("content", "")
+                        if isinstance(existing, str):
+                            _sm["content"] = existing + marker
+                        else:
+                            # Multimodal content blocks — append text block
+                            try:
+                                blocks = list(existing) if existing else []
+                                blocks.append({"type": "text", "text": marker})
+                                _sm["content"] = blocks
+                            except Exception:
+                                pass
+                        _injected = True
+                        logger.debug(
+                            "Pre-API-call steer drain: injected into tool msg at index %d",
+                            _si,
+                        )
+                        break
+                if not _injected:
+                    # No tool message to inject into — put it back so
+                    # the post-tool-execution drain picks it up later.
+                    _lock = getattr(self, "_pending_steer_lock", None)
+                    if _lock is not None:
+                        with _lock:
+                            if self._pending_steer:
+                                self._pending_steer = self._pending_steer + "\n" + _pre_api_steer
+                            else:
+                                self._pending_steer = _pre_api_steer
+                    else:
+                        existing = getattr(self, "_pending_steer", None)
+                        self._pending_steer = (existing + "\n" + _pre_api_steer) if existing else _pre_api_steer
+
             # Prepare messages for API call
             # If we have an ephemeral system prompt, prepend it to the messages
             # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
@@ -10559,7 +10620,7 @@ class AIAgent:
                                 self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
                                 self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
                                 self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
-                                if "openrouter" in str(_base).lower():
+                                if base_url_host_matches(str(_base), "openrouter.ai"):
                                     self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
                         else:
                             self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
@@ -10756,10 +10817,33 @@ class AIAgent:
                 if self.api_mode == "codex_responses":
                     assistant_message, finish_reason = self._normalize_codex_response(response)
                 elif self.api_mode == "anthropic_messages":
-                    from agent.anthropic_adapter import normalize_anthropic_response
-                    assistant_message, finish_reason = normalize_anthropic_response(
+                    from agent.anthropic_adapter import normalize_anthropic_response_v2
+                    _nr = normalize_anthropic_response_v2(
                         response, strip_tool_prefix=self._is_anthropic_oauth
                     )
+                    # Back-compat shim: downstream code expects SimpleNamespace with
+                    # .content, .tool_calls, .reasoning, .reasoning_content,
+                    # .reasoning_details attributes.  This shim makes the cost of the
+                    # old interface visible — it vanishes when the full transport
+                    # wiring lands (PR 3+).
+                    assistant_message = SimpleNamespace(
+                        content=_nr.content,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id=tc.id,
+                                type="function",
+                                function=SimpleNamespace(name=tc.name, arguments=tc.arguments),
+                            )
+                            for tc in (_nr.tool_calls or [])
+                        ] or None,
+                        reasoning=_nr.reasoning,
+                        reasoning_content=None,
+                        reasoning_details=(
+                            _nr.provider_data.get("reasoning_details")
+                            if _nr.provider_data else None
+                        ),
+                    )
+                    finish_reason = _nr.finish_reason
                 else:
                     assistant_message = response.choices[0].message
                 
@@ -11826,7 +11910,7 @@ def main(
     
     # Handle tool listing
     if list_tools:
-        from model_tools import get_all_tool_names, get_toolset_for_tool, get_available_toolsets
+        from model_tools import get_all_tool_names, get_available_toolsets
         from toolsets import get_all_toolsets, get_toolset_info
         
         print("📋 Available Tools & Toolsets:")
