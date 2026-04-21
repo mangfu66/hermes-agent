@@ -149,7 +149,11 @@ def _coerce_content_to_text(content: Any) -> str:
     return str(content)
 
 
-def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+def _translate_tool_call_to_gemini(
+    tool_call: Dict[str, Any],
+    *,
+    include_id: bool = False,
+) -> Dict[str, Any]:
     """OpenAI tool_call -> Gemini functionCall part."""
     fn = tool_call.get("function") or {}
     args_raw = fn.get("arguments", "")
@@ -159,13 +163,14 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         args = {"_raw": args_raw}
     if not isinstance(args, dict):
         args = {"_value": args}
-    call_id = str(tool_call.get("id") or "").strip() or f"call_{uuid.uuid4().hex[:12]}"
+    function_call = {
+        "name": fn.get("name") or "",
+        "args": args,
+    }
+    if include_id:
+        function_call["id"] = str(tool_call.get("id") or "").strip() or f"call_{uuid.uuid4().hex[:12]}"
     return {
-        "functionCall": {
-            "id": call_id,
-            "name": fn.get("name") or "",
-            "args": args,
-        },
+        "functionCall": function_call,
         # Sentinel signature — matches opencode-gemini-auth's approach.
         # Without this, Code Assist rejects function calls that originated
         # outside its own chain.
@@ -173,12 +178,16 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
+def _translate_tool_result_to_gemini(
+    message: Dict[str, Any],
+    *,
+    include_id: bool = False,
+) -> Dict[str, Any]:
     """OpenAI tool-role message -> Gemini functionResponse part.
 
-    Preserve both the function name and the originating tool-call ID so Claude
-    backends behind Antigravity can reconstruct Anthropic's ``tool_result``
-    shape (which requires ``tool_use_id``).
+    Claude backends behind Antigravity require the original tool-call id so
+    they can reconstruct Anthropic's ``tool_result.tool_use_id``. Native Gemini
+    requests reject that extra field, so callers opt in only for Claude mode.
     """
     name = str(message.get("name") or "tool")
     tool_use_id = str(message.get("tool_call_id") or "").strip()
@@ -196,13 +205,15 @@ def _translate_tool_result_to_gemini(message: Dict[str, Any]) -> Dict[str, Any]:
             "response": response,
         },
     }
-    if tool_use_id:
+    if include_id and tool_use_id:
         payload["functionResponse"]["id"] = tool_use_id
     return payload
 
 
 def _build_gemini_contents(
     messages: List[Dict[str, Any]],
+    *,
+    include_tool_ids: bool = False,
 ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Convert OpenAI messages[] to Gemini contents[] + systemInstruction."""
     system_text_parts: List[str] = []
@@ -221,7 +232,7 @@ def _build_gemini_contents(
         if role == "tool" or role == "function":
             contents.append({
                 "role": "user",
-                "parts": [_translate_tool_result_to_gemini(msg)],
+                "parts": [_translate_tool_result_to_gemini(msg, include_id=include_tool_ids)],
             })
             continue
 
@@ -237,7 +248,7 @@ def _build_gemini_contents(
         if isinstance(tool_calls, list):
             for tc in tool_calls:
                 if isinstance(tc, dict):
-                    parts.append(_translate_tool_call_to_gemini(tc))
+                    parts.append(_translate_tool_call_to_gemini(tc, include_id=include_tool_ids))
 
         if not parts:
             # Gemini rejects empty parts; skip the turn entirely
@@ -343,7 +354,10 @@ def build_gemini_request(
     schema_mode: str = "gemini",
 ) -> Dict[str, Any]:
     """Build the inner Gemini request body (goes inside ``request`` wrapper)."""
-    contents, system_instruction = _build_gemini_contents(messages)
+    contents, system_instruction = _build_gemini_contents(
+        messages,
+        include_tool_ids=(schema_mode == "claude"),
+    )
 
     body: Dict[str, Any] = {"contents": contents}
     if system_instruction is not None:

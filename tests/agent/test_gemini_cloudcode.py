@@ -610,7 +610,7 @@ class TestBuildGeminiRequest:
         model_turn = req["contents"][1]
         assert model_turn["role"] == "model"
         fc_part = next(p for p in model_turn["parts"] if "functionCall" in p)
-        assert fc_part["functionCall"]["id"] == "call_1"
+        assert "id" not in fc_part["functionCall"]
         assert fc_part["functionCall"]["name"] == "get_weather"
         assert fc_part["functionCall"]["args"] == {"city": "SF"}
 
@@ -633,9 +633,35 @@ class TestBuildGeminiRequest:
         # Last content turn should carry functionResponse
         last = req["contents"][-1]
         fr_part = next(p for p in last["parts"] if "functionResponse" in p)
-        assert fr_part["functionResponse"]["id"] == "c1"
+        assert "id" not in fr_part["functionResponse"]
         assert fr_part["functionResponse"]["name"] == "get_weather"
         assert fr_part["functionResponse"]["response"] == {"temp": 72}
+
+    def test_claude_mode_preserves_tool_call_and_result_ids(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        req = build_gemini_request(messages=[
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": '{"city": "SF"}'},
+                }],
+            },
+            {
+                "role": "tool",
+                "name": "get_weather",
+                "tool_call_id": "call_1",
+                "content": '{"temp": 72}',
+            },
+        ], schema_mode="claude")
+        fc_part = next(p for p in req["contents"][1]["parts"] if "functionCall" in p)
+        fr_part = next(p for p in req["contents"][2]["parts"] if "functionResponse" in p)
+        assert fc_part["functionCall"]["id"] == "call_1"
+        assert fr_part["functionResponse"]["id"] == "call_1"
 
     def test_tools_translated_to_function_declarations(self):
         from agent.gemini_cloudcode_adapter import build_gemini_request
