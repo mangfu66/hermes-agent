@@ -390,6 +390,7 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
     )
     fake_meta = types.ModuleType("agent.model_metadata")
     fake_meta.get_model_context_length = lambda *args, **kwargs: 100000
+    fake_meta.estimate_messages_tokens_rough = lambda *args, **kwargs: 0
 
     server._sessions["sid"] = _session(agent=_Agent())
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
