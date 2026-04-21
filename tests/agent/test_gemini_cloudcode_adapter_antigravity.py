@@ -27,12 +27,35 @@ class _FakeResponse:
         }
 
 
+class _FakeRateLimitResponse(_FakeResponse):
+    def __init__(self, model: str, retry_delay: str = "0.5s"):
+        super().__init__(429)
+        self.text = (
+            '{'
+            '"error": {'
+            '"code": 429,'
+            '"message": "You have exhausted your capacity on this model. Your quota will reset after 0s.",'
+            '"status": "RESOURCE_EXHAUSTED",'
+            '"details": ['
+            '{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED", '
+            f'"metadata": {{"model": "{model}"}}' + '},'
+            '{"@type": "type.googleapis.com/google.rpc.RetryInfo", '
+            f'"retryDelay": "{retry_delay}"' + '}'
+            ']'
+            '}'
+            '}'
+        )
+
+
 class _FakeHTTP:
-    def __init__(self):
+    def __init__(self, responses=None):
         self.calls = []
+        self._responses = list(responses or [])
 
     def post(self, url, json=None, headers=None):
         self.calls.append({"url": url, "json": json, "headers": headers})
+        if self._responses:
+            return self._responses.pop(0)
         return _FakeResponse(200)
 
     def close(self):
@@ -98,3 +121,27 @@ def test_antigravity_forwards_explicit_gemini_thinking_config(antigravity_client
         "thinkingLevel": "low",
         "includeThoughts": True,
     }
+
+
+def test_antigravity_opus_retries_short_rate_limits(monkeypatch):
+    monkeypatch.setattr("agent.google_antigravity_oauth.get_valid_access_token", lambda: "ya29.antigravity")
+    monkeypatch.setattr("agent.gemini_cloudcode_adapter.time.sleep", lambda _seconds: None)
+    client = GeminiCloudCodeClient(ide_type="ANTIGRAVITY")
+    client._ensure_project_context = lambda access_token, model: ProjectContext(
+        project_id="cool-environs-jdt91",
+        managed_project_id="",
+        tier_id="standard-tier",
+        source="test",
+    )
+    client._http = _FakeHTTP([
+        _FakeRateLimitResponse("claude-opus-4-6-thinking", retry_delay="0.2s"),
+        _FakeResponse(200),
+    ])
+
+    resp = client.chat.completions.create(
+        model="claude-opus-4-6-thinking",
+        messages=[{"role": "user", "content": "Reply with exactly OK and nothing else."}],
+    )
+
+    assert len(client._http.calls) == 2
+    assert resp.choices[0].message.content == "OK"

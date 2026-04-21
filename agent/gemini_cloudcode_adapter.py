@@ -55,6 +55,8 @@ ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 ANTIGRAVITY_AUTOPUSH_ENDPOINT = "https://autopush-cloudcode-pa.sandbox.googleapis.com"
 DEFAULT_ANTIGRAVITY_VERSION = "1.18.4"
 CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14"
+ANTIGRAVITY_OPUS_RETRY_ATTEMPTS = 4
+ANTIGRAVITY_OPUS_MAX_BACKOFF_SECONDS = 2.5
 
 
 def _is_antigravity_mode(ide_type: str) -> bool:
@@ -63,6 +65,33 @@ def _is_antigravity_mode(ide_type: str) -> bool:
 
 def _is_antigravity_claude_model(model: str) -> bool:
     return str(model or "").strip().lower().startswith("claude-")
+
+
+def _is_antigravity_opus_model(model: str) -> bool:
+    return str(model or "").strip().lower() == "claude-opus-4-6-thinking"
+
+
+def _antigravity_opus_retry_delay_seconds(err: CodeAssistError, attempt_index: int) -> float:
+    retry_after = getattr(err, "retry_after", None)
+    try:
+        retry_after_val = float(retry_after) if retry_after is not None else 0.0
+    except (TypeError, ValueError):
+        retry_after_val = 0.0
+    # Short bounded backoff: honor Google's hint when present, otherwise use a
+    # small escalating delay. Cap aggressively so Hermes recovers quickly.
+    fallback = 0.5 * (attempt_index + 1)
+    return max(0.1, min(ANTIGRAVITY_OPUS_MAX_BACKOFF_SECONDS, max(retry_after_val, fallback)))
+
+
+def _should_retry_antigravity_opus_error(err: CodeAssistError, *, model: str, ide_type: str) -> bool:
+    if not _is_antigravity_mode(ide_type) or not _is_antigravity_opus_model(model):
+        return False
+    if getattr(err, "status_code", None) != 429:
+        return False
+    details = getattr(err, "details", {}) or {}
+    reason = str(details.get("reason") or "").strip().upper()
+    status = str(details.get("status") or "").strip().upper()
+    return reason in {"RATE_LIMIT_EXCEEDED", "MODEL_CAPACITY_EXHAUSTED"} or status == "RESOURCE_EXHAUSTED"
 
 
 def _antigravity_http_headers(model: str) -> Dict[str, str]:
@@ -762,11 +791,24 @@ class GeminiCloudCodeClient:
         last_response = None
         for endpoint in endpoints:
             url = f"{endpoint}/v1internal:generateContent"
-            response = self._http.post(url, json=wrapped, headers=headers)
-            last_response = response
-            if response.status_code == 200:
+            for attempt_index in range(ANTIGRAVITY_OPUS_RETRY_ATTEMPTS):
+                response = self._http.post(url, json=wrapped, headers=headers)
+                last_response = response
+                if response.status_code == 200:
+                    break
+                if response.status_code in {403, 404} and endpoint != endpoints[-1]:
+                    break
+                err = _gemini_http_error(response)
+                if (
+                    _should_retry_antigravity_opus_error(err, model=model, ide_type=self._ide_type)
+                    and attempt_index < (ANTIGRAVITY_OPUS_RETRY_ATTEMPTS - 1)
+                ):
+                    time.sleep(_antigravity_opus_retry_delay_seconds(err, attempt_index))
+                    continue
+                raise err
+            if last_response is not None and last_response.status_code == 200:
                 break
-            if response.status_code in {403, 404} and endpoint != endpoints[-1]:
+            if last_response is not None and last_response.status_code in {403, 404} and endpoint != endpoints[-1]:
                 continue
             break
         response = last_response
@@ -799,27 +841,38 @@ class GeminiCloudCodeClient:
             last_exc = None
             for endpoint in endpoints:
                 url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
-                try:
-                    with self._http.stream("POST", url, json=wrapped, headers=stream_headers) as response:
-                        if response.status_code != 200:
-                            response.read()
-                            err = _gemini_http_error(response)
-                            last_exc = err
-                            if response.status_code in {403, 404} and endpoint != endpoints[-1]:
-                                continue
-                            raise err
-                        tool_call_counter: List[int] = [0]
-                        for event in _iter_sse_events(response):
-                            for chunk in _translate_stream_event(event, model, tool_call_counter):
-                                yield chunk
-                        return
-                except httpx.HTTPError as exc:
-                    last_exc = CodeAssistError(
-                        f"Streaming request failed: {exc}",
-                        code="code_assist_stream_error",
-                    )
-                    if endpoint == endpoints[-1]:
-                        raise last_exc from exc
+                for attempt_index in range(ANTIGRAVITY_OPUS_RETRY_ATTEMPTS):
+                    try:
+                        with self._http.stream("POST", url, json=wrapped, headers=stream_headers) as response:
+                            if response.status_code != 200:
+                                response.read()
+                                err = _gemini_http_error(response)
+                                last_exc = err
+                                if response.status_code in {403, 404} and endpoint != endpoints[-1]:
+                                    break
+                                if (
+                                    _should_retry_antigravity_opus_error(err, model=model, ide_type=self._ide_type)
+                                    and attempt_index < (ANTIGRAVITY_OPUS_RETRY_ATTEMPTS - 1)
+                                ):
+                                    time.sleep(_antigravity_opus_retry_delay_seconds(err, attempt_index))
+                                    continue
+                                raise err
+                            tool_call_counter: List[int] = [0]
+                            for event in _iter_sse_events(response):
+                                for chunk in _translate_stream_event(event, model, tool_call_counter):
+                                    yield chunk
+                            return
+                    except httpx.HTTPError as exc:
+                        last_exc = CodeAssistError(
+                            f"Streaming request failed: {exc}",
+                            code="code_assist_stream_error",
+                        )
+                        if endpoint == endpoints[-1]:
+                            raise last_exc from exc
+                        break
+                else:
+                    continue
+                if last_exc is not None and getattr(last_exc, 'status_code', None) in {403, 404} and endpoint != endpoints[-1]:
                     continue
             if last_exc is not None:
                 raise last_exc
