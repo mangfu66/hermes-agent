@@ -135,6 +135,12 @@ class TestGeminiModelCatalog:
             "gpt-oss-120b-medium",
         ]
 
+    @pytest.mark.parametrize("model_id", _PROVIDER_MODELS["google-antigravity"])
+    def test_validate_requested_model_accepts_every_antigravity_catalog_model(self, model_id):
+        result = validate_requested_model(model_id, provider="google-antigravity")
+        assert result["accepted"] is True
+        assert result["recognized"] is True
+
     def test_validate_requested_model_rejects_removed_antigravity_opus_non_thinking(self):
         result = validate_requested_model("claude-opus-4-6", provider="google-antigravity")
         assert result["accepted"] is False
@@ -179,10 +185,19 @@ class TestGeminiModelNormalization:
 # ── Context Length ──
 
 class TestGeminiContextLength:
-    def test_context_length_uses_antigravity_provider_overrides(self):
-        assert get_model_context_length("claude-opus-4-6-thinking", provider="google-antigravity") == 200000
-        assert get_model_context_length("claude-sonnet-4-6", provider="google-antigravity") == 200000
-        assert get_model_context_length("gpt-oss-120b-medium", provider="google-antigravity") == 131072
+    @pytest.mark.parametrize(
+        ("model_id", "expected"),
+        [
+            ("claude-opus-4-6-thinking", 1000000),
+            ("claude-sonnet-4-6", 1000000),
+            ("gemini-3.1-pro-high", 1048576),
+            ("gemini-3.1-pro-low", 1048576),
+            ("gemini-3-flash", 1048576),
+            ("gpt-oss-120b-medium", 131072),
+        ],
+    )
+    def test_context_length_uses_antigravity_provider_overrides(self, model_id, expected):
+        assert get_model_context_length(model_id, provider="google-antigravity") == expected
 
     def test_gemma_4_31b_context(self):
         # Mock external API lookups to test against hardcoded defaults

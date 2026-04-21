@@ -101,8 +101,13 @@ MINIMUM_CONTEXT_LENGTH = 64_000
 # model IDs but exposes different real context windows (e.g. Antigravity Claude).
 _PROVIDER_CONTEXT_LENGTHS: Dict[str, Dict[str, int]] = {
     "google-antigravity": {
-        "claude-opus-4-6-thinking": 200000,
-        "claude-sonnet-4-6": 200000,
+        # Antigravity currently exposes Claude 4.6 Sonnet/Opus with the same
+        # 1M window as the underlying 4.6 family. Product UI and live traffic
+        # both advertise these as 1M-capable; keep an explicit provider-level
+        # override so provider-specific lookups don't fall back to the older
+        # generic Claude catch-all.
+        "claude-opus-4-6-thinking": 1000000,
+        "claude-sonnet-4-6": 1000000,
         "gemini-3.1-pro-high": 1048576,
         "gemini-3.1-pro-low": 1048576,
         "gemini-3-flash": 1048576,

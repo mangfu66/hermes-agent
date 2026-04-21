@@ -236,6 +236,80 @@ class TestCloudCodeStreamingSelection:
             pass
 
 
+class TestCloudCodeThinkingConfig:
+    def test_google_gemini_cli_build_api_kwargs_includes_thinking_config(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                model="gemini-3.1-pro-preview",
+                provider="google-gemini-cli",
+                base_url="cloudcode-pa://google",
+                api_key="oauth-token",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        agent.reasoning_config = {"enabled": True, "effort": "low"}
+        kwargs = agent._build_api_kwargs([])
+        assert kwargs["extra_body"]["thinking_config"] == {
+            "thinkingLevel": "low",
+            "includeThoughts": True,
+        }
+        try:
+            agent.close()
+        except Exception:
+            pass
+
+    def test_antigravity_fixed_high_model_omits_redundant_thinking_config(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                model="gemini-3.1-pro-high",
+                provider="google-antigravity",
+                base_url="cloudcode-pa://google",
+                api_key="oauth-token",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        agent.reasoning_config = {"enabled": True, "effort": "low"}
+        kwargs = agent._build_api_kwargs([])
+        assert "thinking_config" not in kwargs.get("extra_body", {})
+        try:
+            agent.close()
+        except Exception:
+            pass
+
+    def test_antigravity_disable_reasoning_sends_zero_budget(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                model="gemini-3-flash",
+                provider="google-antigravity",
+                base_url="cloudcode-pa://google",
+                api_key="oauth-token",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+        agent.reasoning_config = {"enabled": False}
+        kwargs = agent._build_api_kwargs([])
+        assert kwargs["extra_body"]["thinking_config"] == {"thinkingBudget": 0}
+        try:
+            agent.close()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Helper to build mock assistant messages (API response objects)
 # ---------------------------------------------------------------------------

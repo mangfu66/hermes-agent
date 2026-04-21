@@ -56,27 +56,45 @@ def antigravity_client(monkeypatch):
     return client
 
 
-def test_antigravity_claude_uses_daily_endpoint_and_headers(antigravity_client):
+@pytest.mark.parametrize(
+    ("model_id", "expects_anthropic_beta"),
+    [
+        ("gemini-3.1-pro-high", False),
+        ("gemini-3.1-pro-low", False),
+        ("gemini-3-flash", False),
+        ("claude-sonnet-4-6", True),
+        ("claude-opus-4-6-thinking", True),
+        ("gpt-oss-120b-medium", False),
+    ],
+)
+def test_antigravity_all_catalog_models_use_expected_endpoint_and_headers(
+    antigravity_client, model_id, expects_anthropic_beta
+):
     resp = antigravity_client.chat.completions.create(
-        model="claude-opus-4-6-thinking",
+        model=model_id,
         messages=[{"role": "user", "content": "Reply with exactly OK and nothing else."}],
     )
-    call = antigravity_client._http.calls[0]
+    call = antigravity_client._http.calls[-1]
     assert call["url"] == f"{ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:generateContent"
     assert call["json"]["requestType"] == "agent"
     assert call["json"]["userAgent"] == "antigravity"
     assert call["json"]["requestId"].startswith("agent-")
     assert call["headers"]["User-Agent"].startswith("antigravity/")
-    assert call["headers"]["anthropic-beta"] == "interleaved-thinking-2025-05-14"
+    if expects_anthropic_beta:
+        assert call["headers"]["anthropic-beta"] == "interleaved-thinking-2025-05-14"
+    else:
+        assert "anthropic-beta" not in call["headers"]
     assert resp.choices[0].message.content == "OK"
 
 
-def test_antigravity_gemini_omits_anthropic_beta(antigravity_client):
+def test_antigravity_forwards_explicit_gemini_thinking_config(antigravity_client):
     antigravity_client.chat.completions.create(
-        model="gemini-3.1-pro-high",
+        model="gemini-3-flash",
         messages=[{"role": "user", "content": "Reply with exactly OK and nothing else."}],
+        extra_body={"thinking_config": {"thinkingLevel": "low", "includeThoughts": True}},
     )
-    call = antigravity_client._http.calls[0]
-    assert call["url"] == f"{ANTIGRAVITY_DAILY_ENDPOINT}/v1internal:generateContent"
-    assert call["headers"]["User-Agent"].startswith("antigravity/")
-    assert "anthropic-beta" not in call["headers"]
+    call = antigravity_client._http.calls[-1]
+    assert call["json"]["request"]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "low",
+        "includeThoughts": True,
+    }

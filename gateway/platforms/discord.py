@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import warnings
 from collections import defaultdict
 from typing import Callable, Dict, Optional, Any
 
@@ -25,9 +26,15 @@ logger = logging.getLogger(__name__)
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
 
 try:
-    import discord
-    from discord import Message as DiscordMessage, Intents
-    from discord.ext import commands
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"'audioop' is deprecated and slated for removal in Python 3\.13",
+            category=DeprecationWarning,
+        )
+        import discord
+        from discord import Message as DiscordMessage, Intents
+        from discord.ext import commands
     DISCORD_AVAILABLE = True
 except ImportError:
     DISCORD_AVAILABLE = False

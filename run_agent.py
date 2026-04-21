@@ -6985,6 +6985,10 @@ class AIAgent:
             extra_body["provider"] = provider_preferences
         _is_nous = "nousresearch" in self._base_url_lower
 
+        cloudcode_thinking = self._cloudcode_thinking_extra_body()
+        if cloudcode_thinking is not None:
+            extra_body["thinking_config"] = cloudcode_thinking
+
         if self._supports_reasoning_extra_body():
             if _is_github_models:
                 github_reasoning = self._github_models_reasoning_extra_body()
@@ -7111,6 +7115,43 @@ class AIAgent:
                 requested_effort = supported_efforts[0]
 
         return {"effort": requested_effort}
+
+    def _cloudcode_thinking_extra_body(self) -> dict | None:
+        """Translate Hermes reasoning_config into Gemini Cloud Code thinkingConfig.
+
+        The Cloud Code / Antigravity adapters already understand
+        ``extra_body["thinking_config"]`` and normalize it into
+        ``generationConfig.thinkingConfig``. Hermes' main request builder just
+        wasn't supplying that field. Keep the mapping conservative:
+
+        - only Gemini-family Cloud Code routes receive it
+        - ``none`` becomes ``thinkingBudget=0``
+        - minimal/low -> thinkingLevel=low
+        - medium/high/xhigh -> thinkingLevel=high
+        - Antigravity's fixed ``*-high`` / ``*-low`` model IDs already encode a
+          tier, so only explicit disable is forwarded for those variants.
+        """
+        if self.provider not in {"google-gemini-cli", "google-antigravity"}:
+            return None
+        model_lower = str(self.model or "").strip().lower()
+        if not model_lower.startswith("gemini-"):
+            return None
+        if not isinstance(self.reasoning_config, dict) or not self.reasoning_config:
+            return None
+
+        enabled = self.reasoning_config.get("enabled", True)
+        if enabled is False:
+            return {"thinkingBudget": 0}
+
+        if self.provider == "google-antigravity" and model_lower.endswith(("-high", "-low")):
+            return None
+
+        effort = str(self.reasoning_config.get("effort", "medium") or "medium").strip().lower()
+        thinking_level = "low" if effort in {"minimal", "low"} else "high"
+        return {
+            "thinkingLevel": thinking_level,
+            "includeThoughts": True,
+        }
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Build a normalized assistant message dict from an API response message.

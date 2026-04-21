@@ -420,33 +420,26 @@ def _timeout_handler(signum, frame):
 def _ensure_current_event_loop(request):
     """Provide a default event loop for sync tests that call get_event_loop().
 
-    Python 3.11+ no longer guarantees a current loop for plain synchronous tests.
-    A number of gateway tests still use asyncio.get_event_loop().run_until_complete(...).
-    Ensure they always have a usable loop without interfering with pytest-asyncio's
-    own loop management for @pytest.mark.asyncio tests.
+    Python 3.11+/3.12 emits a DeprecationWarning when plain synchronous code
+    calls ``get_event_loop()`` without one being set. A number of gateway/TUI
+    tests still use ``asyncio.get_event_loop().run_until_complete(...)``.
+    Create and install a fresh loop for non-asyncio tests up front so those
+    call sites stay warning-free and deterministic, while leaving
+    pytest-asyncio-managed tests alone.
     """
     if request.node.get_closest_marker("asyncio") is not None:
         yield
         return
 
-    try:
-        loop = asyncio.get_event_loop_policy().get_event_loop()
-    except RuntimeError:
-        loop = None
-
-    created = loop is None or loop.is_closed()
-    if created:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         yield
     finally:
-        if created and loop is not None:
-            try:
-                loop.close()
-            finally:
-                asyncio.set_event_loop(None)
+        try:
+            loop.close()
+        finally:
+            asyncio.set_event_loop(None)
 
 
 @pytest.fixture(autouse=True)
