@@ -32,6 +32,21 @@ _GEMINI_SCHEMA_ALLOWED_KEYS = {
     "maximum",
 }
 
+# Anthropic-backed Claude routes behind Antigravity are stricter than Gemini's
+# own function-declaration schema handling. In practice they reject several
+# metadata-only fields and some permissive union/object patterns that Gemini
+# accepts. Keep a second pass that trims the schema down to the subset we've
+# verified works against the live Claude backend.
+_CLAUDE_TOOL_SCHEMA_DROP_KEYS = {
+    "default",
+    "title",
+    "example",
+    "propertyOrdering",
+    "format",
+    "pattern",
+    "description",
+}
+
 
 def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
     """Return a Gemini-compatible copy of a tool parameter schema.
@@ -80,6 +95,90 @@ def sanitize_gemini_tool_parameters(parameters: Any) -> Dict[str, Any]:
     """Normalize tool parameters to a valid Gemini object schema."""
 
     cleaned = sanitize_gemini_schema(parameters)
+    if not cleaned:
+        return {"type": "object", "properties": {}}
+    return cleaned
+
+
+def _sanitize_claude_tool_schema(schema: Any) -> Dict[str, Any]:
+    """Trim a Gemini-sanitized schema down to a Claude-compatible subset."""
+    if not isinstance(schema, dict):
+        return {}
+
+    cleaned: Dict[str, Any] = {}
+    for key, value in schema.items():
+        if key in _CLAUDE_TOOL_SCHEMA_DROP_KEYS:
+            continue
+        if key == "properties":
+            if not isinstance(value, dict):
+                continue
+            props: Dict[str, Any] = {}
+            for prop_name, prop_schema in value.items():
+                if not isinstance(prop_name, str):
+                    continue
+                props[prop_name] = _sanitize_claude_tool_schema(prop_schema)
+            cleaned[key] = props
+            continue
+        if key == "items":
+            item_schema = _sanitize_claude_tool_schema(value)
+            # Anthropic rejects completely empty array item schemas. This most
+            # often happens when an OpenAI schema used ``$ref``/``$defs`` and
+            # the generic Gemini sanitizer stripped those fields, leaving
+            # ``items: {}``. Promote that case to an explicit empty object.
+            if not item_schema:
+                item_schema = {"type": "object", "properties": {}}
+            cleaned[key] = item_schema
+            continue
+        if key == "anyOf":
+            if not isinstance(value, list):
+                continue
+            options: List[Dict[str, Any]] = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                sanitized = _sanitize_claude_tool_schema(item)
+                if sanitized == {"type": "null"}:
+                    continue
+                if sanitized == {"type": "object"} and len(value) > 1:
+                    continue
+                options.append(sanitized)
+            if not options:
+                continue
+            if len(options) == 1:
+                cleaned.update(options[0])
+                continue
+            option_types = {str(opt.get("type") or "").strip() for opt in options if isinstance(opt, dict)}
+            option_types.discard("")
+            # Anthropic's validator is much less tolerant of ``anyOf`` than the
+            # Gemini path. Collapse common unions to a single broad type.
+            if option_types and option_types.issubset({"integer", "number"}):
+                cleaned["type"] = "number"
+            elif "string" in option_types:
+                cleaned["type"] = "string"
+            elif "boolean" in option_types:
+                cleaned["type"] = "boolean"
+            elif "array" in option_types:
+                cleaned["type"] = "array"
+                exemplar = next((opt for opt in options if opt.get("type") == "array"), None)
+                if isinstance(exemplar, dict) and isinstance(exemplar.get("items"), dict):
+                    cleaned["items"] = exemplar["items"]
+            elif "object" in option_types:
+                exemplar = next((opt for opt in options if opt.get("type") == "object"), None)
+                cleaned["type"] = "object"
+                cleaned["properties"] = dict(exemplar.get("properties") or {}) if isinstance(exemplar, dict) else {}
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def sanitize_claude_tool_parameters(parameters: Any) -> Dict[str, Any]:
+    """Normalize tool parameters for Claude behind Antigravity.
+
+    Start from the generic Gemini-safe schema, then drop extra metadata and
+    simplify nullable/object unions that Anthropic's validator rejects in the
+    Cloud Code Claude path.
+    """
+    cleaned = _sanitize_claude_tool_schema(sanitize_gemini_schema(parameters))
     if not cleaned:
         return {"type": "object", "properties": {}}
     return cleaned

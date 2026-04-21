@@ -39,7 +39,10 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent import google_oauth, google_antigravity_oauth
-from agent.gemini_schema import sanitize_gemini_tool_parameters
+from agent.gemini_schema import (
+    sanitize_claude_tool_parameters,
+    sanitize_gemini_tool_parameters,
+)
 from agent.google_code_assist import (
     CODE_ASSIST_ENDPOINT,
     FREE_TIER_ID,
@@ -248,7 +251,11 @@ def _build_gemini_contents(
     return contents, system_instruction
 
 
-def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:
+def _translate_tools_to_gemini(
+    tools: Any,
+    *,
+    schema_mode: str = "gemini",
+) -> List[Dict[str, Any]]:
     """OpenAI tools[] -> Gemini tools[].functionDeclarations[]."""
     if not isinstance(tools, list) or not tools:
         return []
@@ -267,7 +274,10 @@ def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:
             decl["description"] = str(fn["description"])
         params = fn.get("parameters")
         if isinstance(params, dict):
-            decl["parameters"] = sanitize_gemini_tool_parameters(params)
+            if schema_mode == "claude":
+                decl["parameters"] = sanitize_claude_tool_parameters(params)
+            else:
+                decl["parameters"] = sanitize_gemini_tool_parameters(params)
         declarations.append(decl)
     if not declarations:
         return []
@@ -325,6 +335,7 @@ def build_gemini_request(
     top_p: Optional[float] = None,
     stop: Any = None,
     thinking_config: Any = None,
+    schema_mode: str = "gemini",
 ) -> Dict[str, Any]:
     """Build the inner Gemini request body (goes inside ``request`` wrapper)."""
     contents, system_instruction = _build_gemini_contents(messages)
@@ -333,7 +344,7 @@ def build_gemini_request(
     if system_instruction is not None:
         body["systemInstruction"] = system_instruction
 
-    gemini_tools = _translate_tools_to_gemini(tools)
+    gemini_tools = _translate_tools_to_gemini(tools, schema_mode=schema_mode)
     if gemini_tools:
         body["tools"] = gemini_tools
     tool_cfg = _translate_tool_choice_to_gemini(tool_choice)
@@ -763,6 +774,7 @@ class GeminiCloudCodeClient:
             top_p=top_p,
             stop=stop,
             thinking_config=thinking_config,
+            schema_mode="claude" if (_is_antigravity_mode(self._ide_type) and _is_antigravity_claude_model(model)) else "gemini",
         )
         wrapped = wrap_code_assist_request(
             project_id=ctx.project_id,

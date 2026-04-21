@@ -688,6 +688,73 @@ class TestBuildGeminiRequest:
             "description": "City name",
         }
 
+    def test_claude_schema_mode_strips_metadata_and_nullable_unions(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        req = build_gemini_request(
+            messages=[{"role": "user", "content": "hi"}],
+            schema_mode="claude",
+            tools=[
+                {"type": "function", "function": {
+                    "name": "fn1",
+                    "description": "foo",
+                    "parameters": {
+                        "type": "object",
+                        "title": "ProbeArgs",
+                        "properties": {
+                            "proxy": {
+                                "title": "Proxy",
+                                "default": None,
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {"type": "object", "additionalProperties": {"type": "string"}},
+                                    {"type": "null"},
+                                ],
+                            },
+                            "wait": {
+                                "anyOf": [
+                                    {"type": "integer"},
+                                    {"type": "number"},
+                                ]
+                            },
+                        },
+                    },
+                }},
+            ],
+        )
+        params = req["tools"][0]["functionDeclarations"][0]["parameters"]
+        assert "title" not in params
+        assert params["type"] == "object"
+        assert params["properties"]["proxy"] == {"type": "string"}
+        assert params["properties"]["wait"] == {"type": "number"}
+
+    def test_claude_schema_mode_promotes_empty_array_items_to_object(self):
+        from agent.gemini_cloudcode_adapter import build_gemini_request
+
+        req = build_gemini_request(
+            messages=[{"role": "user", "content": "hi"}],
+            schema_mode="claude",
+            tools=[
+                {"type": "function", "function": {
+                    "name": "fn1",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cookies": {
+                                "type": "array",
+                                "items": {"$ref": "#/$defs/SetCookieParam"},
+                            }
+                        },
+                    },
+                }},
+            ],
+        )
+        params = req["tools"][0]["functionDeclarations"][0]["parameters"]
+        assert params["properties"]["cookies"] == {
+            "type": "array",
+            "items": {"type": "object", "properties": {}},
+        }
+
     def test_tool_choice_auto(self):
         from agent.gemini_cloudcode_adapter import build_gemini_request
 
