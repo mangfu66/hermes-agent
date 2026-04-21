@@ -808,7 +808,13 @@ def list_authenticated_providers(
         fetch_models_dev,
         get_provider_info as _mdev_pinfo,
     )
-    from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        get_antigravity_oauth_auth_status,
+        get_gemini_oauth_auth_status,
+        resolve_external_process_provider_credentials,
+        resolve_gemini_cli_process_credentials,
+    )
     from hermes_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS
 
     results: List[dict] = []
@@ -935,6 +941,26 @@ def list_authenticated_providers(
                     has_creds = True
             except Exception as exc:
                 logger.debug("Credential pool check failed for %s: %s", hermes_slug, exc)
+        # External-process and OAuth-external providers keep credentials outside
+        # the generic auth store / pool path. Probe their native runtime helpers
+        # so picker rows appear as soon as the provider is actually configured.
+        if not has_creds and overlay.auth_type == "oauth_external":
+            try:
+                if hermes_slug == "google-gemini-cli":
+                    has_creds = bool(get_gemini_oauth_auth_status().get("logged_in"))
+                elif hermes_slug == "google-antigravity":
+                    has_creds = bool(get_antigravity_oauth_auth_status().get("logged_in"))
+            except Exception as exc:
+                logger.debug("OAuth auth-status check failed for %s: %s", hermes_slug, exc)
+        if not has_creds and overlay.auth_type == "external_process":
+            try:
+                if hermes_slug == "google-gemini-acp":
+                    resolve_gemini_cli_process_credentials()
+                else:
+                    resolve_external_process_provider_credentials(hermes_slug)
+                has_creds = True
+            except Exception as exc:
+                logger.debug("External-process probe failed for %s: %s", hermes_slug, exc)
         # Fallback: check external credential files directly.
         # The credential pool gates anthropic behind
         # is_provider_explicitly_configured() to prevent auxiliary tasks

@@ -14,6 +14,29 @@ from hermes_cli import runtime_provider as rp
 # Tests for list_authenticated_providers including full models list
 # =============================================================================
 
+def test_list_authenticated_providers_surfaces_google_oauth_and_acp_channels(monkeypatch):
+    """Configured Google OAuth / ACP channels should each get their own picker row.
+
+    Regression: these providers all map to models.dev's generic ``google`` vendor,
+    but their credentials live outside the generic API-key env/path. The picker
+    previously collapsed them away and only showed the plain ``gemini`` provider.
+    """
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.auth.get_gemini_oauth_auth_status", lambda: {"logged_in": True})
+    monkeypatch.setattr("hermes_cli.auth.get_antigravity_oauth_auth_status", lambda: {"logged_in": True})
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_gemini_cli_process_credentials",
+        lambda: {"provider": "google-gemini-acp", "command": "/usr/bin/gemini", "args": ["--acp"]},
+    )
+
+    providers = list_authenticated_providers(current_provider="openai-codex", user_providers=None, custom_providers=None, max_models=8)
+    slugs = {p["slug"] for p in providers}
+
+    assert "google-gemini-cli" in slugs
+    assert "google-antigravity" in slugs
+    assert "google-gemini-acp" in slugs
+
+
 def test_list_authenticated_providers_includes_full_models_list_from_user_providers(monkeypatch):
     """User-defined providers should expose both default_model and full models list.
     
