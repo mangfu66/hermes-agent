@@ -240,11 +240,13 @@ class TestFindOpenrouterSlug:
 
 class TestDetectProviderForModel:
     def test_anthropic_model_detected(self):
-        """claude-opus-4-6 should resolve to anthropic provider."""
+        """claude-opus-4-6 should resolve to a direct Claude-capable provider."""
         with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
             result = detect_provider_for_model("claude-opus-4-6", "openai-codex")
         assert result is not None
-        assert result[0] == "anthropic"
+        # Environments with Claude Code installed may prefer claude-acp over
+        # direct Anthropic credentials. Both are valid direct-provider targets.
+        assert result[0] in ("anthropic", "claude-acp")
 
     def test_deepseek_model_detected(self):
         """deepseek-chat should resolve to deepseek provider."""
