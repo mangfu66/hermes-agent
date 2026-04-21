@@ -2128,12 +2128,7 @@ class HermesCLI:
 
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
-            context_tokens = (
-                snapshot["session_prompt_tokens"]
-                or snapshot["session_total_tokens"]
-                or getattr(compressor, "last_prompt_tokens", 0)
-                or 0
-            )
+            context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
             context_length = getattr(compressor, "context_length", 0) or 0
             snapshot["context_tokens"] = context_tokens
             snapshot["context_length"] = context_length or None

@@ -18,9 +18,44 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import run_agent
-from run_agent import AIAgent
+from run_agent import AIAgent, _context_display_prompt_tokens
 from agent.error_classifier import FailoverReason
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+
+
+def test_context_display_prompt_tokens_keeps_provider_report_for_standard_models():
+    messages = [{"role": "user", "content": "hi"}]
+    tools = _make_tool_defs("web_search")
+    assert _context_display_prompt_tokens(
+        provider="anthropic",
+        messages=messages,
+        tools=tools,
+        provider_prompt_tokens=42,
+    ) == 42
+
+
+def test_context_display_prompt_tokens_estimates_google_code_assist_requests():
+    messages = [{"role": "user", "content": "hi"}]
+    tools = _make_tool_defs("web_search")
+    estimated = run_agent.estimate_request_tokens_rough(messages, tools=tools)
+    assert _context_display_prompt_tokens(
+        provider="google-gemini-cli",
+        messages=messages,
+        tools=tools,
+        provider_prompt_tokens=42,
+    ) == estimated
+    assert _context_display_prompt_tokens(
+        provider="google-antigravity",
+        messages=messages,
+        tools=tools,
+        provider_prompt_tokens=42,
+    ) == estimated
+    assert _context_display_prompt_tokens(
+        provider="google-gemini-acp",
+        messages=messages,
+        tools=tools,
+        provider_prompt_tokens=42,
+    ) == estimated
 
 
 # ---------------------------------------------------------------------------
