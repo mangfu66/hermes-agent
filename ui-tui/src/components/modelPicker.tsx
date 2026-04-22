@@ -11,6 +11,31 @@ const VISIBLE = 12
 const MIN_WIDTH = 40
 const MAX_WIDTH = 90
 
+export const initialEnterGuardStep = (
+  swallowNextEnter: boolean,
+  ch: string,
+  key: {
+    downArrow?: boolean
+    escape?: boolean
+    return?: boolean
+    upArrow?: boolean
+  }
+) => {
+  if (!swallowNextEnter) {
+    return { consume: false, swallowNextEnter: false }
+  }
+
+  if (key.return) {
+    return { consume: true, swallowNextEnter: false }
+  }
+
+  if (key.upArrow || key.downArrow || key.escape || !!ch) {
+    return { consume: false, swallowNextEnter: false }
+  }
+
+  return { consume: false, swallowNextEnter: true }
+}
+
 const pageOffset = (count: number, sel: number) => Math.max(0, Math.min(sel - Math.floor(VISIBLE / 2), count - VISIBLE))
 
 const visibleItems = (items: string[], sel: number) => {
@@ -28,6 +53,7 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
   const [providerIdx, setProviderIdx] = useState(0)
   const [modelIdx, setModelIdx] = useState(0)
   const [stage, setStage] = useState<'model' | 'provider'>('provider')
+  const [swallowInitialEnter, setSwallowInitialEnter] = useState(true)
 
   const { stdout } = useStdout()
   // Pin the picker to a stable width so the FloatBox parent (which shrinks-
@@ -72,6 +98,14 @@ export function ModelPicker({ gw, onCancel, onSelect, sessionId, t }: ModelPicke
   const names = useMemo(() => providerDisplayNames(providers), [providers])
 
   useInput((ch, key) => {
+    const guard = initialEnterGuardStep(swallowInitialEnter, ch, key)
+    if (guard.swallowNextEnter !== swallowInitialEnter) {
+      setSwallowInitialEnter(guard.swallowNextEnter)
+    }
+    if (guard.consume) {
+      return
+    }
+
     if (key.escape) {
       if (stage === 'model') {
         setStage('provider')
