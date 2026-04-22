@@ -1214,7 +1214,13 @@ class SlashCommandCompleter(Completer):
             # Dynamic completions for commands with runtime lists
             if " " not in sub_text:
                 if base_cmd == "/model":
-                    yield from self._model_completions(sub_text, sub_lower)
+                    # Bare `/model` (or `/model ` with only a trailing space)
+                    # should execute the picker, not spray alias suggestions that
+                    # steal Enter before the command runs. Only start model-alias
+                    # completion after the user has typed at least one character
+                    # of the sub-argument.
+                    if sub_text:
+                        yield from self._model_completions(sub_text, sub_lower)
                     return
                 if base_cmd == "/skin":
                     yield from self._skin_completions(sub_text, sub_lower)
