@@ -670,7 +670,7 @@ def _build_schema(
         },
         "auto_archive_duration": {
             "type": "integer",
-            "enum": [60, 1440, 4320, 10080],
+            "enum": ["60", "1440", "4320", "10080"],
             "description": "Thread archive duration in minutes (create_thread, default 1440).",
         },
     }
@@ -883,7 +883,7 @@ registry.register(
         limit=args.get("limit", 50),
         before=args.get("before", ""),
         after=args.get("after", ""),
-        auto_archive_duration=args.get("auto_archive_duration", 1440),
+        auto_archive_duration=int(args.get("auto_archive_duration", 1440)),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_discord_tool_requirements,
