@@ -22,11 +22,16 @@ def test_list_authenticated_providers_surfaces_google_oauth_and_acp_channels(mon
     previously collapsed them away and only showed the plain ``gemini`` provider.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
     monkeypatch.setattr("hermes_cli.auth.get_gemini_oauth_auth_status", lambda: {"logged_in": True})
     monkeypatch.setattr("hermes_cli.auth.get_antigravity_oauth_auth_status", lambda: {"logged_in": True})
     monkeypatch.setattr(
         "hermes_cli.auth.resolve_gemini_cli_process_credentials",
         lambda: {"provider": "google-gemini-acp", "command": "/usr/bin/gemini", "args": ["--acp"]},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_external_process_provider_credentials",
+        lambda provider_id: {"provider": provider_id, "command": "/usr/bin/mock-acp", "args": ["--acp", "--stdio"]},
     )
 
     providers = list_authenticated_providers(current_provider="openai-codex", user_providers=None, custom_providers=None, max_models=8)
@@ -35,6 +40,60 @@ def test_list_authenticated_providers_surfaces_google_oauth_and_acp_channels(mon
     assert "google-gemini-cli" in slugs
     assert "google-antigravity" in slugs
     assert "google-gemini-acp" in slugs
+    assert "claude-acp" in slugs
+
+
+def test_list_authenticated_providers_hides_disabled_google_and_claude_channels(monkeypatch):
+    """disabled_providers should remove configured Google/Claude ACP rows from /model."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "disabled_providers": [
+                "google-gemini-cli",
+                "google-gemini-acp",
+                "google-antigravity",
+                "claude-acp",
+            ]
+        },
+    )
+    monkeypatch.setattr("hermes_cli.auth.get_gemini_oauth_auth_status", lambda: {"logged_in": True})
+    monkeypatch.setattr("hermes_cli.auth.get_antigravity_oauth_auth_status", lambda: {"logged_in": True})
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_gemini_cli_process_credentials",
+        lambda: {"provider": "google-gemini-acp", "command": "/usr/bin/gemini", "args": ["--acp"]},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_external_process_provider_credentials",
+        lambda provider_id: {"provider": provider_id, "command": "/usr/bin/mock-acp", "args": ["--acp", "--stdio"]},
+    )
+
+    providers = list_authenticated_providers(current_provider="openai-codex", user_providers=None, custom_providers=None, max_models=8)
+    slugs = {p["slug"] for p in providers}
+
+    assert "google-gemini-cli" not in slugs
+    assert "google-gemini-acp" not in slugs
+    assert "google-antigravity" not in slugs
+    assert "claude-acp" not in slugs
+
+
+def test_switch_model_rejects_disabled_provider(monkeypatch):
+    """Explicit switches to disabled providers should fail before runtime resolution."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"disabled_providers": ["claude-acp"]},
+    )
+
+    result = switch_model(
+        "",
+        current_provider="openai-codex",
+        current_model="gpt-5.4",
+        explicit_provider="claude-acp",
+    )
+
+    assert result.success is False
+    assert "disabled" in result.error_message.lower()
+    assert result.target_provider == "claude-acp"
 
 
 def test_list_authenticated_providers_includes_full_models_list_from_user_providers(monkeypatch):

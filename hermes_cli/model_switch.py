@@ -219,6 +219,47 @@ def _ensure_direct_aliases() -> None:
         DIRECT_ALIASES = _load_direct_aliases()
 
 
+def _load_disabled_provider_slugs(
+    user_providers: dict | None = None,
+    custom_providers: list | None = None,
+) -> set[str]:
+    """Return normalized provider slugs disabled in config.yaml.
+
+    Supported config keys:
+      - disabled_providers: [slug, ...]
+      - hidden_providers: [slug, ...]   # backward/alternative naming
+      - model.disabled_providers / model.hidden_providers
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception:
+        return set()
+
+    candidates: list[str] = []
+    if isinstance(cfg, dict):
+        for key in ("disabled_providers", "hidden_providers"):
+            value = cfg.get(key)
+            if isinstance(value, list):
+                candidates.extend(v for v in value if isinstance(v, str))
+
+        model_cfg = cfg.get("model")
+        if isinstance(model_cfg, dict):
+            for key in ("disabled_providers", "hidden_providers"):
+                value = model_cfg.get(key)
+                if isinstance(value, list):
+                    candidates.extend(v for v in value if isinstance(v, str))
+
+    disabled: set[str] = set()
+    for raw in candidates:
+        slug = raw.strip().lower()
+        if not slug:
+            continue
+        pdef = resolve_provider_full(slug, user_providers, custom_providers)
+        disabled.add((pdef.id if pdef else slug).lower())
+    return disabled
+
+
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------
@@ -467,6 +508,7 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    disabled_slugs = _load_disabled_provider_slugs(user_providers, custom_providers)
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -501,6 +543,16 @@ def switch_model(
             )
 
         target_provider = pdef.id
+        if target_provider.lower() in disabled_slugs:
+            return ModelSwitchResult(
+                success=False,
+                is_global=is_global,
+                target_provider=target_provider,
+                provider_label=pdef.name,
+                error_message=(
+                    f"Provider '{pdef.name}' is disabled in config.yaml under disabled_providers."
+                ),
+            )
 
         # If no model specified, try auto-detect from endpoint
         if not new_model:
@@ -629,6 +681,17 @@ def switch_model(
     # =================================================================
     # COMMON PATH: Resolve credentials, normalize, get metadata
     # =================================================================
+
+    if target_provider.lower() in disabled_slugs:
+        return ModelSwitchResult(
+            success=False,
+            is_global=is_global,
+            target_provider=target_provider,
+            provider_label=get_label(target_provider),
+            error_message=(
+                f"Provider '{get_label(target_provider)}' is disabled in config.yaml under disabled_providers."
+            ),
+        )
 
     provider_changed = target_provider != current_provider
     provider_label = get_label(target_provider)
@@ -820,6 +883,7 @@ def list_authenticated_providers(
     results: List[dict] = []
     seen_slugs: set = set()  # lowercase-normalized to catch case variants (#9545)
     seen_mdev_ids: set = set()  # prevent duplicate entries for aliases (e.g. kimi-coding + kimi-coding-cn)
+    disabled_slugs = _load_disabled_provider_slugs(user_providers, custom_providers)
 
     data = fetch_models_dev()
 
@@ -836,6 +900,8 @@ def list_authenticated_providers(
 
     # --- 1. Check Hermes-mapped providers ---
     for hermes_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
+        if hermes_id.lower() in disabled_slugs:
+            continue
         # Skip aliases that map to the same models.dev provider (e.g.
         # kimi-coding and kimi-coding-cn both → kimi-for-coding).
         # The first one with valid credentials wins (#10526).
@@ -892,12 +958,12 @@ def list_authenticated_providers(
     _mdev_to_hermes = {v: k for k, v in PROVIDER_TO_MODELS_DEV.items()}
 
     for pid, overlay in HERMES_OVERLAYS.items():
-        if pid.lower() in seen_slugs:
+        if pid.lower() in seen_slugs or pid.lower() in disabled_slugs:
             continue
 
         # Resolve Hermes slug — e.g. "github-copilot" → "copilot"
         hermes_slug = _mdev_to_hermes.get(pid, pid)
-        if hermes_slug.lower() in seen_slugs:
+        if hermes_slug.lower() in seen_slugs or hermes_slug.lower() in disabled_slugs:
             continue
 
         # Check if credentials exist
@@ -1011,7 +1077,7 @@ def list_authenticated_providers(
         _canon_provs = []
 
     for _cp in _canon_provs:
-        if _cp.slug.lower() in seen_slugs:
+        if _cp.slug.lower() in seen_slugs or _cp.slug.lower() in disabled_slugs:
             continue
 
         # Check credentials via PROVIDER_REGISTRY (auth.py)
