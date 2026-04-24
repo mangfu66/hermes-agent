@@ -2793,6 +2793,9 @@ def _kill_orphaned_mcp_children() -> None:
         pids = dict(_stdio_pids)
         _stdio_pids.clear()
 
+    if not pids:
+        return
+
     # Phase 1: SIGTERM (graceful)
     for pid, server_name in pids.items():
         try:
