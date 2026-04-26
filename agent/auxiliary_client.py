@@ -221,6 +221,18 @@ _CODEX_AUX_MODEL = "gpt-5.2-codex"
 _CODEX_AUX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
+def _is_codex_backend_url(url: str) -> bool:
+    """Return True if *url* points to the ChatGPT Codex Responses API backend.
+
+    The Codex backend rejects sampling parameters (``temperature``,
+    ``max_output_tokens``) that are valid on normal chat-completions
+    endpoints.  Callers use this to strip unsupported kwargs proactively.
+    """
+    return (url or "").strip().rstrip("/").lower().startswith(
+        _CODEX_AUX_BASE_URL.lower()
+    )
+
+
 def _codex_cloudflare_headers(access_token: str) -> Dict[str, str]:
     """Headers required to avoid Cloudflare 403s on chatgpt.com/backend-api/codex.
 
@@ -1729,7 +1741,8 @@ def resolve_provider_client(
     def _needs_codex_wrap(client_obj, base_url_str: str, model_str: str) -> bool:
         """Decide if a plain OpenAI client should be wrapped for Responses API.
 
-        Returns True when api_mode is explicitly "codex_responses", or when
+        Returns True when api_mode is explicitly "codex_responses", when
+        the base_url points to the ChatGPT Codex backend, or when
         auto-detection (api.openai.com + codex-family model) suggests it.
         Already-wrapped clients (CodexAuxiliaryClient) are skipped.
         """
@@ -1738,6 +1751,10 @@ def resolve_provider_client(
         if raw_codex:
             return False
         if api_mode == "codex_responses":
+            return True
+        # Auto-detect: chatgpt.com/backend-api/codex always needs wrapping
+        # regardless of model name — the backend speaks Responses API only.
+        if _is_codex_backend_url(base_url_str):
             return True
         # Auto-detect: api.openai.com + codex model name pattern
         if api_mode and api_mode != "codex_responses":
@@ -2911,6 +2928,16 @@ def _build_call_kwargs(
         "messages": messages,
         "timeout": timeout,
     }
+
+    # The ChatGPT Codex backend (chatgpt.com/backend-api/codex) rejects
+    # temperature and token-cap kwargs entirely.  Strip them proactively so
+    # callers that pass temperature (e.g. memory flush, compression) don't
+    # cause HTTP 400.  The CodexAuxiliaryClient adapter also omits these,
+    # but this guard covers any code path where the raw client is used
+    # against the Codex backend URL.  See #15916.
+    if _is_codex_backend_url(base_url):
+        temperature = None
+        max_tokens = None
 
     fixed_temperature = _fixed_temperature_for_model(model, base_url)
     if fixed_temperature is OMIT_TEMPERATURE:

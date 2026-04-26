@@ -1103,6 +1103,110 @@ class TestKimiTemperatureOmitted:
 
 
 # ---------------------------------------------------------------------------
+# Codex backend: strip unsupported parameters (#15916)
+# ---------------------------------------------------------------------------
+
+
+class TestCodexBackendUnsupportedParams:
+    """The ChatGPT Codex backend rejects temperature and token-cap kwargs.
+
+    _build_call_kwargs must strip them when base_url points to the Codex
+    backend, and _needs_codex_wrap (inside resolve_provider_client) must
+    detect the Codex backend URL regardless of model name.
+    """
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://chatgpt.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex/",
+            "https://CHATGPT.COM/backend-api/codex",
+        ],
+    )
+    def test_build_call_kwargs_strips_temperature_for_codex(self, base_url):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            base_url=base_url,
+        )
+
+        assert "temperature" not in kwargs
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://chatgpt.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex/",
+        ],
+    )
+    def test_build_call_kwargs_strips_max_tokens_for_codex(self, base_url):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="custom",
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=4096,
+            base_url=base_url,
+        )
+
+        assert "max_tokens" not in kwargs
+        assert "max_completion_tokens" not in kwargs
+
+    def test_build_call_kwargs_preserves_temperature_for_non_codex(self):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="openrouter",
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+        assert kwargs["temperature"] == 0.3
+
+    def test_is_codex_backend_url_helper(self):
+        from agent.auxiliary_client import _is_codex_backend_url
+
+        assert _is_codex_backend_url("https://chatgpt.com/backend-api/codex") is True
+        assert _is_codex_backend_url("https://chatgpt.com/backend-api/codex/") is True
+        assert _is_codex_backend_url("https://CHATGPT.COM/backend-api/codex") is True
+        assert _is_codex_backend_url("https://api.openai.com/v1") is False
+        assert _is_codex_backend_url("") is False
+        assert _is_codex_backend_url(None) is False
+
+    def test_resolve_provider_wraps_codex_backend_for_non_codex_model(
+        self, monkeypatch
+    ):
+        """When custom provider base_url is the Codex backend with a
+        non-codex-named model (e.g. gpt-5.5), it must still be wrapped
+        in CodexAuxiliaryClient."""
+        from agent.auxiliary_client import (
+            CodexAuxiliaryClient,
+            resolve_provider_client,
+        )
+
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        client, model = resolve_provider_client(
+            "custom",
+            "gpt-5.5",
+            explicit_base_url="https://chatgpt.com/backend-api/codex",
+            explicit_api_key="test-codex-token",
+        )
+
+        assert isinstance(client, CodexAuxiliaryClient), (
+            f"Expected CodexAuxiliaryClient but got {type(client).__name__}. "
+            f"Custom endpoint at chatgpt.com/backend-api/codex must be wrapped "
+            f"to avoid sending unsupported parameters like temperature."
+        )
+
+
+# ---------------------------------------------------------------------------
 # async_call_llm payment / connection fallback (#7512 bug 2)
 # ---------------------------------------------------------------------------
 
