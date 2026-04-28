@@ -5418,6 +5418,12 @@ class AIAgent:
             and self._api_kwargs_have_image_parts(api_kwargs or {})
         ):
             request_kwargs["default_headers"] = self._copilot_headers_for_request(is_vision=True)
+        # Per-request OpenAI-wire clients should not use the SDK's internal
+        # retry loop. Hermes already owns retry with richer recovery
+        # (credential rotation, provider fallback, backoff), and leaving SDK
+        # retries on can stretch one hung request to ~3× the intended stale
+        # timeout before the outer loop regains control.
+        request_kwargs["max_retries"] = 0
         return self._create_openai_client(request_kwargs, reason=reason, shared=False)
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
@@ -5999,7 +6005,13 @@ class AIAgent:
                         reason="chat_completion_request",
                         api_kwargs=api_kwargs,
                     )
-                    result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
+                    # Push the stale timeout down into the SDK call itself so
+                    # a hung provider fails at the same boundary the polling
+                    # loop expects, instead of burning extra time inside SDK
+                    # retries or a longer transport read timeout.
+                    _call_kwargs = dict(api_kwargs)
+                    _call_kwargs.setdefault("timeout", _stale_timeout)
+                    result["response"] = request_client_holder["client"].chat.completions.create(**_call_kwargs)
             except Exception as e:
                 result["error"] = e
             finally:
