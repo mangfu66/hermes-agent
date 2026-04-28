@@ -1,4 +1,7 @@
+import { writeFileSync } from 'node:fs'
+
 import type { ScrollBoxHandle } from '@hermes/ink'
+import { evictInkCaches } from '@hermes/ink'
 import { type RefObject, useCallback } from 'react'
 
 import { capHistory } from '../config/limits.js'
@@ -22,6 +25,18 @@ import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
 const usageFrom = (info: null | SessionInfo): Usage => (info?.usage ? { ...ZERO, ...info.usage } : ZERO)
+
+export const writeActiveSessionFile = (sessionId: null | string, file = process.env.HERMES_TUI_ACTIVE_SESSION_FILE) => {
+  if (!file || !sessionId) {
+    return
+  }
+
+  try {
+    writeFileSync(file, JSON.stringify({ session_id: sessionId }), { mode: 0o600 })
+  } catch {
+    // Best-effort shell epilogue hint only; never break live session changes.
+  }
+}
 
 const trimTail = (items: Msg[]) => {
   const q = [...items]
@@ -85,6 +100,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     setLastUserMsg('')
     setStickyPrompt('')
     composerActions.setPasteSnips([])
+    // Half-prune: new session has new keys, but keep a warm pool in case
+    // the user resumes back to the prior session.
+    evictInkCaches('half')
   }, [composerActions, setHistoryItems, setLastUserMsg, setStickyPrompt, setVoiceProcessing, setVoiceRecording])
 
   const resetVisibleHistory = useCallback(
@@ -128,6 +146,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       resetSession()
       setSessionStartedAt(Date.now())
 
+      writeActiveSessionFile(r.session_id)
       patchUiState({
         info,
         sid: r.session_id,
@@ -141,6 +160,10 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       if (info?.credential_warning) {
         sys(`warning: ${info.credential_warning}`)
+      }
+
+      if (info?.config_warning) {
+        sys(`warning: ${info.config_warning}`)
       }
 
       if (msg) {
@@ -181,6 +204,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               const resumed = toTranscriptMessages(r.messages)
 
               setHistoryItems(capHistory(r.info ? [introMsg(r.info), ...resumed] : resumed))
+              writeActiveSessionFile(r.resumed ?? r.session_id)
               patchUiState({
                 info: r.info ?? null,
                 sid: r.session_id,
