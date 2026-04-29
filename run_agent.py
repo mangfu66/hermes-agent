@@ -1385,6 +1385,10 @@ class AIAgent:
                     }
                 elif base_url_host_matches(effective_base, "api.routermint.com"):
                     client_kwargs["default_headers"] = _routermint_headers()
+                elif base_url_host_matches(effective_base, "opai.mangfu.fun"):
+                    client_kwargs["default_headers"] = {
+                        "User-Agent": "Mozilla/5.0",
+                    }
                 elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
                     from hermes_cli.models import copilot_default_headers
 
