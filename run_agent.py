@@ -41,12 +41,52 @@ import urllib.request
 import uuid
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
-from openai import OpenAI
-import fire
+# NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
+# SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
+# that imports the SDK on first call/isinstance check. This preserves:
+#   (a) the single in-module `OpenAI(**client_kwargs)` call site at
+#       _create_openai_client, and
+#   (b) `patch("run_agent.OpenAI", ...)` test patterns used by ~28 test files.
+#
+# NOTE: `fire` is ONLY used in the `__main__` block below (for running
+# run_agent.py directly as a CLI) — it is NOT needed for library usage.
+# It is imported there, not here, so that importing run_agent from a
+# daemon thread (e.g. curator's forked review agent) never fails with
+# ModuleNotFoundError on broken/partial installs where `fire` isn't present.
 from datetime import datetime
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
+
+
+_OPENAI_CLS_CACHE: Optional[type] = None
+
+
+def _load_openai_cls() -> type:
+    """Import and cache ``openai.OpenAI``."""
+    global _OPENAI_CLS_CACHE
+    if _OPENAI_CLS_CACHE is None:
+        from openai import OpenAI as _cls
+        _OPENAI_CLS_CACHE = _cls
+    return _OPENAI_CLS_CACHE
+
+
+class _OpenAIProxy:
+    """Module-level proxy that looks like ``openai.OpenAI`` but imports lazily."""
+
+    __slots__ = ()
+
+    def __call__(self, *args, **kwargs):
+        return _load_openai_cls()(*args, **kwargs)
+
+    def __instancecheck__(self, obj):
+        return isinstance(obj, _load_openai_cls())
+
+    def __repr__(self):
+        return "<lazy openai.OpenAI proxy>"
+
+
+OpenAI = _OpenAIProxy()
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
@@ -125,32 +165,8 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
+from hermes_cli.config import cfg_get
 
-
-_GOOGLE_CODE_ASSIST_CONTEXT_PROVIDERS = {
-    "google-gemini-cli",
-    "google-gemini-acp",
-    "google-antigravity",
-}
-
-
-def _context_display_prompt_tokens(
-    *,
-    provider: str,
-    messages: list,
-    tools: list | None,
-    provider_prompt_tokens: int,
-) -> int:
-    """Prompt-token figure to expose in status/compression state.
-
-    Google Code Assist channels report promptTokenCount with semantics that do
-    not track the full current request size the same way other providers do.
-    For status-bar/context pressure we want a stable estimate of the request we
-    actually sent, including tool schemas.
-    """
-    if (provider or "").strip().lower() in _GOOGLE_CODE_ASSIST_CONTEXT_PROVIDERS:
-        return estimate_request_tokens_rough(messages or [], tools=tools or [])
-    return max(0, int(provider_prompt_tokens or 0))
 
 
 class _SafeWriter:
@@ -311,6 +327,12 @@ _PATH_SCOPED_TOOLS = frozenset({"read_file", "write_file", "patch"})
 
 # Maximum number of concurrent worker threads for parallel tool execution.
 _MAX_TOOL_WORKERS = 8
+
+# Guard so the OpenRouter metadata pre-warm thread is only spawned once per
+# process, not once per AIAgent instantiation.  Without this, long-running
+# gateway processes leak one OS thread per incoming message and eventually
+# exhaust the system thread limit (RuntimeError: can't start new thread).
+_openrouter_prewarm_done = threading.Event()
 
 # Patterns that indicate a terminal command may modify/delete files.
 _DESTRUCTIVE_PATTERNS = re.compile(
@@ -801,6 +823,24 @@ def _routermint_headers() -> dict:
     }
 
 
+def _opai_relay_headers() -> dict:
+    """Return browser-like headers for the user's opai relay.
+
+    The relay is behind Cloudflare/WAF rules that block the OpenAI SDK's
+    default Python fingerprint with HTTP 403/1010.  A normal browser UA is
+    enough for the endpoint and keeps this narrowly scoped to the known relay
+    host instead of changing headers for every custom provider.
+    """
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+    }
+
+
 def _pool_may_recover_from_rate_limit(pool) -> bool:
     """Decide whether to wait for credential-pool rotation instead of falling back.
 
@@ -915,6 +955,7 @@ class AIAgent:
         thread_id: str = None,
         gateway_session_key: str = None,
         skip_context_files: bool = False,
+        load_soul_identity: bool = False,
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
@@ -966,6 +1007,9 @@ class AIAgent:
             skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
                 into the system prompt. Use this for batch processing and data generation to avoid
                 polluting trajectories with user-specific persona or project instructions.
+            load_soul_identity (bool): If True, still use ~/.hermes/SOUL.md as the primary
+                identity even when skip_context_files=True. Project context files from the cwd
+                remain skipped.
         """
         _install_safe_stdio()
 
@@ -994,6 +1038,7 @@ class AIAgent:
         self._print_fn = None
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
+        self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
@@ -1091,10 +1136,17 @@ class AIAgent:
         # Pre-warm OpenRouter model metadata cache in a background thread.
         # fetch_model_metadata() is cached for 1 hour; this avoids a blocking
         # HTTP request on the first API response when pricing is estimated.
-        if self.provider == "openrouter" or self._is_openrouter_url():
+        # Use a process-level Event so this thread is only spawned once — a new
+        # AIAgent is created for every gateway request, so without the guard
+        # each message leaks one OS thread and the process eventually exhausts
+        # the system thread limit (RuntimeError: can't start new thread).
+        if (self.provider == "openrouter" or self._is_openrouter_url()) and \
+                not _openrouter_prewarm_done.is_set():
+            _openrouter_prewarm_done.set()
             threading.Thread(
-                target=lambda: fetch_model_metadata(),
+                target=fetch_model_metadata,
                 daemon=True,
+                name="openrouter-prewarm",
             ).start()
 
         self.tool_progress_callback = tool_progress_callback
@@ -1371,11 +1423,9 @@ class AIAgent:
                     client_kwargs = {"api_key": api_key, "base_url": base_url}
                 if _provider_timeout is not None:
                     client_kwargs["timeout"] = _provider_timeout
-                if self.provider in {"copilot-acp", "google-gemini-acp", "claude-acp"}:
-                    if self.acp_command:
-                        client_kwargs["command"] = self.acp_command
-                    if self.acp_args:
-                        client_kwargs["args"] = self.acp_args
+                if self.provider == "copilot-acp":
+                    client_kwargs["command"] = self.acp_command
+                    client_kwargs["args"] = self.acp_args
                 effective_base = base_url
                 if base_url_host_matches(effective_base, "openrouter.ai"):
                     client_kwargs["default_headers"] = {
@@ -1386,9 +1436,7 @@ class AIAgent:
                 elif base_url_host_matches(effective_base, "api.routermint.com"):
                     client_kwargs["default_headers"] = _routermint_headers()
                 elif base_url_host_matches(effective_base, "opai.mangfu.fun"):
-                    client_kwargs["default_headers"] = {
-                        "User-Agent": "Mozilla/5.0",
-                    }
+                    client_kwargs["default_headers"] = _opai_relay_headers()
                 elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
                     from hermes_cli.models import copilot_default_headers
 
@@ -1784,7 +1832,7 @@ class AIAgent:
         # compression model. Custom endpoints often cannot report this via
         # /models, so the startup feasibility check needs the config hint.
         try:
-            _aux_cfg = _agent_cfg.get("auxiliary", {}).get("compression", {})
+            _aux_cfg = cfg_get(_agent_cfg, "auxiliary", "compression", default={})
         except Exception:
             _aux_cfg = {}
         if isinstance(_aux_cfg, dict):
@@ -1850,45 +1898,45 @@ class AIAgent:
             # wasn't a valid positive int — the helper silently skips those.
             if _config_context_length is None:
                 _target = self.base_url.rstrip("/") if self.base_url else ""
-                _normalized_provider = (self.provider or "").strip().lower()
                 for _cp_entry in _custom_providers:
                     if not isinstance(_cp_entry, dict):
                         continue
                     _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
-                    if _target and _cp_url != _target:
-                        continue
-                    _cp_provider_key = str(_cp_entry.get("provider_key", "") or "").strip().lower()
-                    if _normalized_provider and _cp_provider_key and _cp_provider_key != _normalized_provider:
-                        continue
-                    _cp_models = _cp_entry.get("models", {})
-                    if isinstance(_cp_models, dict):
-                        _cp_model_cfg = _cp_models.get(self.model, {})
-                        if isinstance(_cp_model_cfg, dict):
-                            _cp_ctx = _cp_model_cfg.get("context_length")
-                            if _cp_ctx is not None:
-                                try:
-                                    _parsed = int(_cp_ctx)
-                                    if _parsed <= 0:
-                                        raise ValueError
-                                except (TypeError, ValueError):
-                                    logger.warning(
-                                        "Invalid context_length for model %r in "
-                                        "custom_providers: %r — must be a positive "
-                                        "integer (e.g. 256000, not '256K'). "
-                                        "Falling back to auto-detection.",
-                                        self.model, _cp_ctx,
-                                    )
-                                    print(
-                                        f"\n⚠ Invalid context_length for model {self.model!r} in custom_providers: {_cp_ctx!r}\n"
-                                        f"  Must be a positive integer (e.g. 256000, not '256K').\n"
-                                        f"  Falling back to auto-detected context window.\n",
-                                        file=sys.stderr,
-                                    )
-                    break
+                    if _target and _cp_url == _target:
+                        _cp_models = _cp_entry.get("models", {})
+                        if isinstance(_cp_models, dict):
+                            _cp_model_cfg = _cp_models.get(self.model, {})
+                            if isinstance(_cp_model_cfg, dict):
+                                _cp_ctx = _cp_model_cfg.get("context_length")
+                                if _cp_ctx is not None:
+                                    try:
+                                        _parsed = int(_cp_ctx)
+                                        if _parsed <= 0:
+                                            raise ValueError
+                                    except (TypeError, ValueError):
+                                        logger.warning(
+                                            "Invalid context_length for model %r in "
+                                            "custom_providers: %r — must be a positive "
+                                            "integer (e.g. 256000, not '256K'). "
+                                            "Falling back to auto-detection.",
+                                            self.model, _cp_ctx,
+                                        )
+                                        print(
+                                            f"\n⚠ Invalid context_length for model {self.model!r} in custom_providers: {_cp_ctx!r}\n"
+                                            f"  Must be a positive integer (e.g. 256000, not '256K').\n"
+                                            f"  Falling back to auto-detected context window.\n",
+                                            file=sys.stderr,
+                                        )
+                        break
 
-        # Store for reuse in switch_model (so config override persists across model switches)
+        # Persist for reuse on switch_model / fallback activation. Must come
+        # AFTER the custom_providers branch so per-model overrides aren't lost.
         self._config_context_length = _config_context_length
-        
+
+        self._ensure_lmstudio_runtime_loaded(_config_context_length)
+
+
+
         # Select context engine: config-driven (like memory providers).
         # 1. Check config.yaml context.engine setting
         # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
@@ -1978,16 +2026,31 @@ class AIAgent:
                 f"model.context_length in config.yaml to override."
             )
 
-        # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand)
+        # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand).
+        # Skip names that are already present — the get_tool_definitions()
+        # quiet_mode cache returned a shared list pre-#17335, so a stray
+        # mutation here would poison subsequent agent inits in the same
+        # Gateway process and trip provider-side 'duplicate tool name'
+        # errors. Even with the cache fix, dedup is the right defense
+        # against plugin paths that may register the same schemas via
+        # ctx.register_tool(). Mirrors the memory tools dedup above.
         self._context_engine_tool_names: set = set()
         if hasattr(self, "context_compressor") and self.context_compressor and self.tools is not None:
+            _existing_tool_names = {
+                t.get("function", {}).get("name")
+                for t in self.tools
+                if isinstance(t, dict)
+            }
             for _schema in self.context_compressor.get_tool_schemas():
+                _tname = _schema.get("name", "")
+                if _tname and _tname in _existing_tool_names:
+                    continue  # already registered via plugin/cache path
                 _wrapped = {"type": "function", "function": _schema}
                 self.tools.append(_wrapped)
-                _tname = _schema.get("name", "")
                 if _tname:
                     self.valid_tool_names.add(_tname)
                     self._context_engine_tool_names.add(_tname)
+                    _existing_tool_names.add(_tname)
 
         # Notify context engine of session start
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -2026,6 +2089,8 @@ class AIAgent:
         # When running against an Ollama server, detect the model's max context
         # and pass num_ctx on every chat request so the full window is used.
         # User override: set model.ollama_num_ctx in config.yaml to cap VRAM use.
+        # If model.context_length is set, it caps num_ctx so the user's VRAM
+        # budget is respected even when GGUF metadata advertises a larger window.
         self._ollama_num_ctx: int | None = None
         _ollama_num_ctx_override = None
         if isinstance(_model_cfg, dict):
@@ -2042,6 +2107,21 @@ class AIAgent:
                     self._ollama_num_ctx = _detected
             except Exception as exc:
                 logger.debug("Ollama num_ctx detection failed: %s", exc)
+        # Cap auto-detected ollama_num_ctx to the user's explicit context_length.
+        # Without this, GGUF metadata can advertise 256K+ which Ollama honours
+        # by allocating that much VRAM — blowing up small GPUs even though the
+        # user explicitly set a smaller context_length in config.yaml.
+        if (
+            self._ollama_num_ctx
+            and _config_context_length
+            and _ollama_num_ctx_override is None  # don't override explicit ollama_num_ctx
+            and self._ollama_num_ctx > _config_context_length
+        ):
+            logger.info(
+                "Ollama num_ctx capped: %d -> %d (model.context_length override)",
+                self._ollama_num_ctx, _config_context_length,
+            )
+            self._ollama_num_ctx = _config_context_length
         if self._ollama_num_ctx and not self.quiet_mode:
             logger.info(
                 "Ollama num_ctx: will request %d tokens (model max from /api/show)",
@@ -2129,7 +2209,40 @@ class AIAgent:
         # Context engine reset (works for both built-in compressor and plugins)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.on_session_reset()
-    
+
+    def _ensure_lmstudio_runtime_loaded(self, config_context_length: Optional[int] = None) -> None:
+        """
+        Preload the LM Studio model with at least Hermes' minimum context.
+        """
+        if (self.provider or "").strip().lower() != "lmstudio":
+            return
+        try:
+            from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+            from hermes_cli.models import ensure_lmstudio_model_loaded
+            if config_context_length is None:
+                config_context_length = getattr(self, "_config_context_length", None)
+            target_ctx = max(config_context_length or 0, MINIMUM_CONTEXT_LENGTH)
+            loaded_ctx = ensure_lmstudio_model_loaded(
+                self.model, self.base_url, getattr(self, "api_key", ""), target_ctx,
+            )
+            if loaded_ctx:
+                # Push into the live compressor so the status bar reflects the
+                # real loaded ctx the moment the load resolves, instead of
+                # holding the previous model's value (or "ctx --") through the
+                # next render tick.
+                cc = getattr(self, "context_compressor", None)
+                if cc is not None:
+                    cc.update_model(
+                        model=self.model,
+                        context_length=loaded_ctx,
+                        base_url=self.base_url,
+                        api_key=getattr(self, "api_key", ""),
+                        provider=self.provider,
+                        api_mode=self.api_mode,
+                    )
+        except Exception as err:
+            logger.debug("LM Studio preload skipped: %s", err)
+
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Switch the model/provider in-place for a live agent.
 
@@ -2224,6 +2337,9 @@ class AIAgent:
                 model=new_model,
             )
         )
+
+        # ── LM Studio: preload before probing context length ──
+        self._ensure_lmstudio_runtime_loaded()
 
         # ── Update context compressor ──
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -2501,15 +2617,12 @@ class AIAgent:
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
 
-            client_provider = getattr(client, "provider", None)
-            if not isinstance(client_provider, str):
-                client_provider = ""
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
-                provider=client_provider,
+                provider=getattr(self, "provider", ""),
             )
 
             # Hard floor: the auxiliary compression model must have at least
@@ -2759,7 +2872,6 @@ class AIAgent:
         eff_api_mode = api_mode if api_mode is not None else (self.api_mode or "")
         eff_model = (model if model is not None else self.model) or ""
 
-        base_lower = eff_base_url.lower()
         model_lower = eff_model.lower()
         provider_lower = eff_provider.lower()
         is_claude = "claude" in model_lower
@@ -2777,6 +2889,24 @@ class AIAgent:
         if is_anthropic_wire and is_claude:
             # Third-party Anthropic-compatible gateway.
             return True, True
+
+        # MiniMax on its Anthropic-compatible endpoint serves its own
+        # model family (MiniMax-M2.7, M2.5, M2.1, M2) with documented
+        # cache_control support (0.1× read pricing, 5-minute TTL).  The
+        # blanket is_claude gate above excludes these — opt them in
+        # explicitly via provider id or host match so users on
+        # provider=minimax / minimax-cn (or custom endpoints pointing at
+        # api.minimax.io/anthropic / api.minimaxi.com/anthropic) get the
+        # same cost reduction as Claude traffic.
+        # Docs: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
+        if is_anthropic_wire:
+            is_minimax_provider = provider_lower in {"minimax", "minimax-cn"}
+            is_minimax_host = (
+                base_url_host_matches(eff_base_url, "api.minimax.io")
+                or base_url_host_matches(eff_base_url, "api.minimaxi.com")
+            )
+            if is_minimax_provider or is_minimax_host:
+                return True, True
 
         # Qwen/Alibaba on OpenCode (Zen/Go) and native DashScope: OpenAI-wire
         # transport that accepts Anthropic-style cache_control markers and
@@ -2863,7 +2993,7 @@ class AIAgent:
 
         # Check if there's any non-whitespace content remaining
         return bool(cleaned.strip())
-    
+
     def _strip_think_blocks(self, content: str) -> str:
         """Remove reasoning/thinking blocks from content, returning only visible text.
 
@@ -3081,8 +3211,8 @@ class AIAgent:
             marker in assistant_text for marker in workspace_markers
         )
         return (user_targets_workspace or assistant_targets_workspace) and assistant_mentions_action
-    
-    
+
+
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """
         Extract reasoning/thinking content from an assistant message.
@@ -3195,49 +3325,135 @@ class AIAgent:
     )
 
     _SKILL_REVIEW_PROMPT = (
-        "Review the conversation above and consider whether a skill should be saved or updated.\n\n"
-        "Work in this order — do not skip steps:\n\n"
-        "1. SURVEY the existing skill landscape first. Call skills_list to see what you "
-        "have. If anything looks potentially relevant, skill_view it before deciding. "
-        "You are looking for the CLASS of task that just happened, not the exact task. "
-        "Example: a successful Tauri build is in the class \"desktop app build "
-        "troubleshooting\", not \"fix my specific Tauri error today\".\n\n"
-        "2. THINK CLASS-FIRST. What general pattern of task did the user just complete? "
-        "What conditions will trigger this pattern again? Describe the class in one "
-        "sentence before looking at what to save.\n\n"
-        "3. PREFER GENERALIZING AN EXISTING SKILL over creating a new one. If a skill "
-        "already covers the class — even partially — update it (skill_manage patch) "
-        "with the new insight. Broaden its \"when to use\" trigger if needed.\n\n"
-        "4. ONLY CREATE A NEW SKILL when no existing skill reasonably covers the class. "
-        "When you create one, name and scope it at the class level "
-        "(\"react-i18n-setup\", not \"add-i18n-to-my-dashboard-app\"). The trigger "
-        "section must describe the class of situations, not this one session.\n\n"
-        "5. If you notice two existing skills that overlap, note it in your response "
-        "so a future review can consolidate them. Do not consolidate now unless the "
-        "overlap is obvious and low-risk.\n\n"
-        "Only act when something is genuinely worth saving. "
-        "If nothing stands out, just say 'Nothing to save.' and stop."
+        "Review the conversation above and update the skill library. Be "
+        "ACTIVE — most sessions produce at least one skill update, even if "
+        "small. A pass that does nothing is a missed learning opportunity, "
+        "not a neutral outcome.\n\n"
+        "Target shape of the library: CLASS-LEVEL skills, each with a rich "
+        "SKILL.md and a `references/` directory for session-specific detail. "
+        "Not a long flat list of narrow one-session-one-skill entries. This "
+        "shapes HOW you update, not WHETHER you update.\n\n"
+        "Signals to look for (any one of these warrants action):\n"
+        "  • User corrected your style, tone, format, legibility, or "
+        "verbosity. Frustration signals like 'stop doing X', 'this is too "
+        "verbose', 'don't format like this', 'why are you explaining', "
+        "'just give me the answer', 'you always do Y and I hate it', or an "
+        "explicit 'remember this' are FIRST-CLASS skill signals, not just "
+        "memory signals. Update the relevant skill(s) to embed the "
+        "preference so the next session starts already knowing.\n"
+        "  • User corrected your workflow, approach, or sequence of steps. "
+        "Encode the correction as a pitfall or explicit step in the skill "
+        "that governs that class of task.\n"
+        "  • Non-trivial technique, fix, workaround, debugging path, or "
+        "tool-usage pattern emerged that a future session would benefit "
+        "from. Capture it.\n"
+        "  • A skill that got loaded or consulted this session turned out "
+        "to be wrong, missing a step, or outdated. Patch it NOW.\n\n"
+        "Preference order — prefer the earliest action that fits, but do "
+        "pick one when a signal above fired:\n"
+        "  1. UPDATE A CURRENTLY-LOADED SKILL. Look back through the "
+        "conversation for skills the user loaded via /skill-name or you "
+        "read via skill_view. If any of them covers the territory of the "
+        "new learning, PATCH that one first. It is the skill that was in "
+        "play, so it's the right one to extend.\n"
+        "  2. UPDATE AN EXISTING UMBRELLA (via skills_list + skill_view). "
+        "If no loaded skill fits but an existing class-level skill does, "
+        "patch it. Add a subsection, a pitfall, or broaden a trigger.\n"
+        "  3. ADD A SUPPORT FILE under an existing umbrella. Skills can be "
+        "packaged with three kinds of support files — use the right "
+        "directory per kind:\n"
+        "     • `references/<topic>.md` — session-specific detail (error "
+        "transcripts, reproduction recipes, provider quirks) AND "
+        "condensed knowledge banks: quoted research, API docs, external "
+        "authoritative excerpts, or domain notes you found while working "
+        "on the problem. Write it concise and for the value of the task, "
+        "not as a full mirror of upstream docs.\n"
+        "     • `templates/<name>.<ext>` — starter files meant to be "
+        "copied and modified (boilerplate configs, scaffolding, a "
+        "known-good example the agent can `reproduce with modifications`).\n"
+        "     • `scripts/<name>.<ext>` — statically re-runnable actions "
+        "the skill can invoke directly (verification scripts, fixture "
+        "generators, deterministic probes, anything the agent should run "
+        "rather than hand-type each time).\n"
+        "     Add support files via skill_manage action=write_file with "
+        "file_path starting 'references/', 'templates/', or 'scripts/'. "
+        "The umbrella's SKILL.md should gain a one-line pointer to any "
+        "new support file so future agents know it exists.\n"
+        "  4. CREATE A NEW CLASS-LEVEL UMBRELLA SKILL when no existing "
+        "skill covers the class. The name MUST be at the class level. "
+        "The name MUST NOT be a specific PR number, error string, feature "
+        "codename, library-alone name, or 'fix-X / debug-Y / audit-Z-today' "
+        "session artifact. If the proposed name only makes sense for "
+        "today's task, it's wrong — fall back to (1), (2), or (3).\n\n"
+        "User-preference embedding (important): when the user expressed a "
+        "style/format/workflow preference, the update belongs in the "
+        "SKILL.md body, not just in memory. Memory captures 'who the user "
+        "is and what the current situation and state of your operations "
+        "are'; skills capture 'how to do this class of task for this "
+        "user'. When they complain about how you handled a task, the "
+        "skill that governs that task needs to carry the lesson.\n\n"
+        "If you notice two existing skills that overlap, note it in your "
+        "reply — the background curator handles consolidation at scale.\n\n"
+        "'Nothing to save.' is a real option but should NOT be the "
+        "default. If the session ran smoothly with no corrections and "
+        "produced no new technique, just say 'Nothing to save.' and stop. "
+        "Otherwise, act."
     )
 
     _COMBINED_REVIEW_PROMPT = (
-        "Review the conversation above and consider two things:\n\n"
-        "**Memory**: Has the user revealed things about themselves — their persona, "
-        "desires, preferences, or personal details? Has the user expressed expectations "
-        "about how you should behave, their work style, or ways they want you to operate? "
-        "If so, save using the memory tool.\n\n"
-        "**Skills**: Was a non-trivial approach used to complete a task that required trial "
-        "and error, changing course due to experiential findings, or a different method "
-        "or outcome than the user expected? If so, work in this order:\n"
-        "  a. SURVEY existing skills first (skills_list, then skill_view on candidates).\n"
-        "  b. Identify the CLASS of task, not the specific task "
-        "(\"desktop app build troubleshooting\", not \"fix my Tauri error\").\n"
-        "  c. PREFER UPDATING/GENERALIZING an existing skill that covers the class.\n"
-        "  d. ONLY CREATE A NEW SKILL if no existing one covers the class. Scope at "
-        "the class level, not this one session.\n"
-        "  e. If you notice overlapping skills during the survey, note it so a future "
-        "review can consolidate them.\n\n"
-        "Only act if there's something genuinely worth saving. "
-        "If nothing stands out, just say 'Nothing to save.' and stop."
+        "Review the conversation above and update two things:\n\n"
+        "**Memory**: who the user is. Did the user reveal persona, "
+        "desires, preferences, personal details, or expectations about "
+        "how you should behave? Save facts about the user and durable "
+        "preferences with the memory tool.\n\n"
+        "**Skills**: how to do this class of task. Be ACTIVE — most "
+        "sessions produce at least one skill update. A pass that does "
+        "nothing is a missed learning opportunity, not a neutral outcome.\n\n"
+        "Target shape of the skill library: CLASS-LEVEL skills with a rich "
+        "SKILL.md and a `references/` directory for session-specific detail. "
+        "Not a long flat list of narrow one-session-one-skill entries.\n\n"
+        "Signals that warrant a skill update (any one is enough):\n"
+        "  • User corrected your style, tone, format, legibility, "
+        "verbosity, or approach. Frustration is a FIRST-CLASS skill "
+        "signal, not just a memory signal. 'stop doing X', 'don't format "
+        "like this', 'I hate when you Y' — embed the lesson in the skill "
+        "that governs that task so the next session starts fixed.\n"
+        "  • Non-trivial technique, fix, workaround, or debugging path "
+        "emerged.\n"
+        "  • A skill that was loaded or consulted turned out wrong, "
+        "missing, or outdated — patch it now.\n\n"
+        "Preference order for skills — pick the earliest that fits:\n"
+        "  1. UPDATE A CURRENTLY-LOADED SKILL. Check what skills were "
+        "loaded via /skill-name or skill_view in the conversation. If one "
+        "of them covers the learning, PATCH it first. It was in play; "
+        "it's the right place.\n"
+        "  2. UPDATE AN EXISTING UMBRELLA (skills_list + skill_view to "
+        "find the right one). Patch it.\n"
+        "  3. ADD A SUPPORT FILE under an existing umbrella via "
+        "skill_manage action=write_file. Three kinds: "
+        "`references/<topic>.md` for session-specific detail OR condensed "
+        "knowledge banks (quoted research, API docs excerpts, domain "
+        "notes) written concise and task-focused; `templates/<name>.<ext>` "
+        "for starter files meant to be copied and modified; "
+        "`scripts/<name>.<ext>` for statically re-runnable actions "
+        "(verification, fixture generators, probes). Add a one-line "
+        "pointer in SKILL.md so future agents find them.\n"
+        "  4. CREATE A NEW CLASS-LEVEL UMBRELLA when nothing exists. "
+        "Name at the class level — NOT a PR number, error string, "
+        "codename, library-alone name, or 'fix-X / debug-Y' session "
+        "artifact. If the name only fits today's task, fall back to (1), "
+        "(2), or (3).\n\n"
+        "User-preference embedding: when the user complains about how "
+        "you handled a task, update the skill that governs that task — "
+        "memory alone isn't enough. Memory says 'who the user is and "
+        "what the current situation and state of your operations are'; "
+        "skills say 'how to do this class of task for this user'. Both "
+        "should carry user-preference lessons when relevant.\n\n"
+        "If you notice overlapping existing skills, mention it — the "
+        "background curator handles consolidation.\n\n"
+        "Act on whichever of the two dimensions has real signal. If "
+        "genuinely nothing stands out on either, say 'Nothing to save.' "
+        "and stop — but don't reach for that conclusion as a default."
     )
 
     @staticmethod
@@ -3569,7 +3785,7 @@ class AIAgent:
         
         # Return everything up to (not including) the last assistant message
         return messages[:last_assistant_idx]
-    
+
     def _format_tools_for_system_message(self) -> str:
         """
         Format tool definitions for the system message in the trajectory format.
@@ -3593,7 +3809,7 @@ class AIAgent:
             formatted_tools.append(formatted_tool)
         
         return json.dumps(formatted_tools, ensure_ascii=False)
-    
+
     def _convert_to_trajectory_format(self, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:
         """
         Convert internal message format to trajectory format for saving.
@@ -3758,7 +3974,7 @@ class AIAgent:
             i += 1
         
         return trajectory
-    
+
     def _save_trajectory(self, messages: List[Dict[str, Any]], user_query: str, completed: bool):
         """
         Save conversation trajectory to JSONL file.
@@ -3773,7 +3989,7 @@ class AIAgent:
         
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
         _save_trajectory_to_file(trajectory, self.model, completed)
-    
+
     @staticmethod
     def _summarize_api_error(error: Exception) -> str:
         """Extract a human-readable one-liner from an API error.
@@ -4085,7 +4301,7 @@ class AIAgent:
         except Exception as e:
             if self.verbose_logging:
                 logging.warning(f"Failed to save session log: {e}")
-    
+
     def interrupt(self, message: str = None) -> None:
         """
         Request the agent to interrupt its current tool-calling loop.
@@ -4153,7 +4369,7 @@ class AIAgent:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
         if not self.quiet_mode:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
-    
+
     def clear_interrupt(self) -> None:
         """Clear any pending interrupt request and the per-thread tool interrupt signal."""
         self._interrupt_requested = False
@@ -4374,7 +4590,7 @@ class AIAgent:
                 )
             except Exception:
                 pass
-    
+
     def commit_memory_session(self, messages: list = None) -> None:
         """Trigger end-of-session extraction without tearing providers down.
         Called when session_id rotates (e.g. /new, context compression);
@@ -4425,8 +4641,14 @@ class AIAgent:
         if not (self._memory_manager and final_response and original_user_message):
             return
         try:
-            self._memory_manager.sync_all(original_user_message, final_response)
-            self._memory_manager.queue_prefetch_all(original_user_message)
+            self._memory_manager.sync_all(
+                original_user_message, final_response,
+                session_id=self.session_id or "",
+            )
+            self._memory_manager.queue_prefetch_all(
+                original_user_message,
+                session_id=self.session_id or "",
+            )
         except Exception:
             pass
 
@@ -4564,7 +4786,7 @@ class AIAgent:
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
         _set_interrupt(False)
-    
+
     @property
     def is_interrupted(self) -> bool:
         """Check if an interrupt has been requested."""
@@ -4596,9 +4818,11 @@ class AIAgent:
         #   6. Current date & time (frozen at build time)
         #   7. Platform-specific formatting hint
 
-        # Try SOUL.md as primary identity (unless context files are skipped)
+        # Try SOUL.md as primary identity unless the caller explicitly skipped it.
+        # Some execution modes (cron) still want HERMES_HOME persona while keeping
+        # cwd project instructions disabled.
         _soul_loaded = False
-        if not self.skip_context_files:
+        if self.load_soul_identity or not self.skip_context_files:
             _soul_content = load_soul_md()
             if _soul_content:
                 prompt_parts = [_soul_content]
@@ -4746,6 +4970,15 @@ class AIAgent:
         platform_key = (self.platform or "").lower().strip()
         if platform_key in PLATFORM_HINTS:
             prompt_parts.append(PLATFORM_HINTS[platform_key])
+        elif platform_key:
+            # Check plugin registry for platform-specific LLM guidance
+            try:
+                from gateway.platform_registry import platform_registry
+                _entry = platform_registry.get(platform_key)
+                if _entry and _entry.platform_hint:
+                    prompt_parts.append(_entry.platform_hint)
+            except Exception:
+                pass
 
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 
@@ -4831,6 +5064,145 @@ class AIAgent:
                 len(missing_results),
             )
         return messages
+
+    @staticmethod
+    def _is_thinking_only_assistant(msg: Dict[str, Any]) -> bool:
+        """Return True if ``msg`` is an assistant turn whose only payload is reasoning.
+
+        "Thinking-only" means the model emitted reasoning (``reasoning`` or
+        ``reasoning_content``) but no visible text and no tool_calls. When sent
+        back to providers that convert reasoning into thinking blocks (native
+        Anthropic, OpenRouter Anthropic, third-party Anthropic-compatible
+        gateways), the resulting message has only thinking blocks — which
+        Anthropic rejects with HTTP 400 "The final block in an assistant
+        message cannot be `thinking`."
+
+        Symmetric with Claude Code's ``filterOrphanedThinkingOnlyMessages``
+        (src/utils/messages.ts). We drop the whole turn from the API copy
+        rather than fabricating stub text — the message log (UI transcript)
+        keeps the reasoning block; only the wire copy is cleaned.
+        """
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            return False
+        if msg.get("tool_calls"):
+            return False
+        # Does it have any actual output?
+        content = msg.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                return False
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    if block:  # non-empty non-dict string etc.
+                        return False
+                    continue
+                btype = block.get("type")
+                if btype in ("thinking", "redacted_thinking"):
+                    continue
+                if btype == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        return False
+                    continue
+                # tool_use, image, document, etc. — real payload
+                return False
+        elif content is not None and content != "":
+            return False
+        # Content is empty-ish. Is there reasoning to make it thinking-only?
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return True
+        # reasoning_details list form
+        rd = msg.get("reasoning_details")
+        if isinstance(rd, list) and rd:
+            return True
+        return False
+
+    @staticmethod
+    def _drop_thinking_only_and_merge_users(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Drop thinking-only assistant turns; merge any adjacent user messages left behind.
+
+        Runs on the per-call ``api_messages`` copy only. The stored
+        conversation history (``self.messages``) is never mutated, so the
+        user still sees the thinking block in the CLI/gateway transcript and
+        session persistence keeps the full trace. Only the wire copy sent to
+        the provider is cleaned.
+
+        Why drop-and-merge rather than inject stub text:
+        - Fabricating ``"."`` / ``"(continued)"`` text lies in the history
+          and makes future turns see model output the model didn't emit.
+        - Dropping the turn preserves honesty; merging adjacent user messages
+          preserves the provider's role-alternation invariant.
+        - This is the pattern used by Claude Code's ``normalizeMessagesForAPI``
+          (filterOrphanedThinkingOnlyMessages + mergeAdjacentUserMessages).
+        """
+        if not messages:
+            return messages
+
+        # Pass 1: drop thinking-only assistant turns.
+        kept = [m for m in messages if not AIAgent._is_thinking_only_assistant(m)]
+        dropped = len(messages) - len(kept)
+        if dropped == 0:
+            return messages
+
+        # Pass 2: merge any newly-adjacent user messages.
+        merged: List[Dict[str, Any]] = []
+        merges = 0
+        for m in kept:
+            prev = merged[-1] if merged else None
+            if (
+                prev is not None
+                and prev.get("role") == "user"
+                and m.get("role") == "user"
+            ):
+                prev_content = prev.get("content", "")
+                cur_content = m.get("content", "")
+                # Work on a copy of ``prev`` so the caller's input dicts are
+                # never mutated. ``_sanitize_api_messages`` upstream already
+                # hands us per-call copies, but staying pure here means we
+                # can be called safely from anywhere (tests, other loops).
+                prev_copy = dict(prev)
+                # Only string-content merge is meaningful for role-alternation
+                # purposes. If either side is a list (multimodal), append as a
+                # separate block rather than collapsing.
+                if isinstance(prev_content, str) and isinstance(cur_content, str):
+                    sep = "\n\n" if prev_content and cur_content else ""
+                    prev_copy["content"] = prev_content + sep + cur_content
+                elif isinstance(prev_content, list) and isinstance(cur_content, list):
+                    prev_copy["content"] = list(prev_content) + list(cur_content)
+                elif isinstance(prev_content, list) and isinstance(cur_content, str):
+                    if cur_content:
+                        prev_copy["content"] = list(prev_content) + [
+                            {"type": "text", "text": cur_content}
+                        ]
+                    else:
+                        prev_copy["content"] = list(prev_content)
+                elif isinstance(prev_content, str) and isinstance(cur_content, list):
+                    new_blocks: List[Dict[str, Any]] = []
+                    if prev_content:
+                        new_blocks.append({"type": "text", "text": prev_content})
+                    new_blocks.extend(cur_content)
+                    prev_copy["content"] = new_blocks
+                else:
+                    # Unknown content shape — fall back to appending separately
+                    # (violates alternation, but safer than raising in a hot path).
+                    merged.append(m)
+                    continue
+                merged[-1] = prev_copy
+                merges += 1
+            else:
+                merged.append(m)
+
+        logger.debug(
+            "Pre-call sanitizer: dropped %d thinking-only assistant turn(s), "
+            "merged %d adjacent user message(s)",
+            dropped,
+            merges,
+        )
+        return merged
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -5086,56 +5458,18 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
-        if self.provider == "claude-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://claude-code"):
-            from agent.copilot_acp_client import CopilotACPClient
-
-            acp_kwargs = {k: v for k, v in client_kwargs.items()
-                         if k in {"api_key", "base_url", "command", "args"}}
-            if not acp_kwargs.get("command"):
-                acp_kwargs["command"] = "claude"
-            if not acp_kwargs.get("args"):
-                acp_kwargs["args"] = ["--acp", "--stdio"]
-            client = CopilotACPClient(**acp_kwargs)
-            logger.info(
-                "Claude ACP client created (%s, shared=%s) %s",
-                reason,
-                shared,
-                self._client_log_context(),
-            )
-            return client
-        if str(client_kwargs.get("base_url", "")).startswith("acp://gemini-cli"):
-            from agent.copilot_acp_client import CopilotACPClient
-
-            acp_kwargs = {k: v for k, v in client_kwargs.items()
-                         if k in {"api_key", "base_url", "command", "args"}}
-            if not acp_kwargs.get("command"):
-                acp_kwargs["command"] = "gemini"
-            if not acp_kwargs.get("args"):
-                acp_kwargs["args"] = ["--acp"]
-            client = CopilotACPClient(**acp_kwargs)
-            logger.info(
-                "Gemini ACP client created (%s, shared=%s) %s",
-                reason,
-                shared,
-                self._client_log_context(),
-            )
-            return client
-        if self.provider in ("google-gemini-cli", "google-antigravity") or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
+        if self.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
             from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 
             # Strip OpenAI-specific kwargs the Gemini client doesn't accept
             safe_kwargs = {
                 k: v for k, v in client_kwargs.items()
-                if k in {"api_key", "base_url", "default_headers", "project_id", "timeout", "ide_type"}
+                if k in {"api_key", "base_url", "default_headers", "project_id", "timeout"}
             }
-            # Antigravity unlocks paid-tier models via a different ideType
-            if self.provider == "google-antigravity" and "ide_type" not in safe_kwargs:
-                safe_kwargs["ide_type"] = "ANTIGRAVITY"
             client = GeminiCloudCodeClient(**safe_kwargs)
             logger.info(
-                "Gemini Cloud Code Assist client created (%s, ide_type=%s, shared=%s) %s",
+                "Gemini Cloud Code Assist client created (%s, shared=%s) %s",
                 reason,
-                safe_kwargs.get("ide_type", "IDE_UNSPECIFIED"),
                 shared,
                 self._client_log_context(),
             )
@@ -5182,6 +5516,8 @@ class AIAgent:
             keepalive_http = self._build_keepalive_http_client(client_kwargs.get("base_url", ""))
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
+        # Uses the module-level `OpenAI` name, resolved lazily on first
+        # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",
@@ -5422,12 +5758,6 @@ class AIAgent:
             and self._api_kwargs_have_image_parts(api_kwargs or {})
         ):
             request_kwargs["default_headers"] = self._copilot_headers_for_request(is_vision=True)
-        # Per-request OpenAI-wire clients should not use the SDK's internal
-        # retry loop. Hermes already owns retry with richer recovery
-        # (credential rotation, provider fallback, backoff), and leaving SDK
-        # retries on can stretch one hung request to ~3× the intended stale
-        # timeout before the outer loop regains control.
-        request_kwargs["max_retries"] = 0
         return self._create_openai_client(request_kwargs, reason=reason, shared=False)
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
@@ -5795,6 +6125,8 @@ class AIAgent:
             self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
         elif base_url_host_matches(base_url, "api.routermint.com"):
             self._client_kwargs["default_headers"] = _routermint_headers()
+        elif base_url_host_matches(base_url, "opai.mangfu.fun"):
+            self._client_kwargs["default_headers"] = _opai_relay_headers()
         elif base_url_host_matches(base_url, "api.githubcopilot.com"):
             from hermes_cli.models import copilot_default_headers
 
@@ -5937,7 +6269,12 @@ class AIAgent:
         correctly — rebuilding with the Bedrock SDK when provider is bedrock,
         rather than always falling back to build_anthropic_client() which
         requires a direct Anthropic API key.
+
+        Honors ``self._oauth_1m_beta_disabled`` (set by the reactive recovery
+        path when an OAuth subscription rejects the 1M-context beta) so the
+        rebuilt client carries the reduced beta set.
         """
+        _drop_1m = bool(getattr(self, "_oauth_1m_beta_disabled", False))
         if getattr(self, "provider", None) == "bedrock":
             from agent.anthropic_adapter import build_anthropic_bedrock_client
             region = getattr(self, "_bedrock_region", "us-east-1") or "us-east-1"
@@ -5948,6 +6285,7 @@ class AIAgent:
                 self._anthropic_api_key,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                drop_context_1m_beta=_drop_1m,
             )
 
     def _interruptible_api_call(self, api_kwargs: dict):
@@ -6009,13 +6347,7 @@ class AIAgent:
                         reason="chat_completion_request",
                         api_kwargs=api_kwargs,
                     )
-                    # Push the stale timeout down into the SDK call itself so
-                    # a hung provider fails at the same boundary the polling
-                    # loop expects, instead of burning extra time inside SDK
-                    # retries or a longer transport read timeout.
-                    _call_kwargs = dict(api_kwargs)
-                    _call_kwargs.setdefault("timeout", _stale_timeout)
-                    result["response"] = request_client_holder["client"].chat.completions.create(**_call_kwargs)
+                    result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
             except Exception as e:
                 result["error"] = e
             finally:
@@ -6258,6 +6590,9 @@ class AIAgent:
         Falls back to _interruptible_api_call on provider errors indicating
         streaming is not supported.
         """
+        if self._interrupt_requested:
+            raise InterruptedError("Agent interrupted before streaming API call")
+
         if self.api_mode == "codex_responses":
             # Codex streams internally via _run_codex_stream. The main dispatch
             # in _interruptible_api_call already calls it; we just need to
@@ -6916,6 +7251,12 @@ class AIAgent:
                         # to non-streaming on the next attempt via _disable_streaming.
                         result["error"] = e
                         return
+            except InterruptedError as e:
+                # The interrupt may be noticed inside the worker thread before
+                # the polling loop sees it. Surface it through the normal result
+                # channel so callers never miss a fast pre-retry interrupt.
+                result["error"] = e
+                return
             finally:
                 request_client = request_client_holder.get("client")
                 if request_client is not None:
@@ -7240,6 +7581,9 @@ class AIAgent:
                     model=fb_model,
                 )
             )
+
+            # LM Studio: preload before probing the fallback's context length.
+            self._ensure_lmstudio_runtime_loaded()
 
             # Update context compressor limits for the fallback model.
             # Without this, compression decisions use the primary model's
@@ -7897,6 +8241,7 @@ class AIAgent:
                 context_length=ctx_len,
                 base_url=getattr(self, "_anthropic_base_url", None),
                 fast_mode=(self.request_overrides or {}).get("speed") == "fast",
+                drop_context_1m_beta=bool(getattr(self, "_oauth_1m_beta_disabled", False)),
             )
 
         # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
@@ -7960,12 +8305,8 @@ class AIAgent:
             or base_url_host_matches(self.base_url, "moonshot.ai")
             or base_url_host_matches(self.base_url, "moonshot.cn")
         )
-        cloudcode_thinking = self._cloudcode_thinking_extra_body()
-        _extra_body_additions = (
-            {"thinking_config": cloudcode_thinking}
-            if cloudcode_thinking is not None
-            else None
-        )
+        _is_tokenhub = base_url_host_matches(self._base_url_lower, "tokenhub.tencentmaas.com")
+        _is_lmstudio = (self.provider or "").strip().lower() == "lmstudio"
 
         # Temperature: _fixed_temperature_for_model may return OMIT_TEMPERATURE
         # sentinel (temperature omitted entirely), a numeric override, or None.
@@ -8033,6 +8374,7 @@ class AIAgent:
             model=self.model,
             messages=_msgs_for_chat,
             tools=self.tools,
+            base_url=self.base_url,
             timeout=self._resolved_api_call_timeout(),
             max_tokens=_effective_max_tokens,
             ephemeral_max_output_tokens=_ephemeral_out,
@@ -8047,6 +8389,8 @@ class AIAgent:
             is_github_models=_is_gh,
             is_nvidia_nim=_is_nvidia,
             is_kimi=_is_kimi,
+            is_tokenhub=_is_tokenhub,
+            is_lmstudio=_is_lmstudio,
             is_custom_provider=self.provider == "custom",
             ollama_num_ctx=self._ollama_num_ctx,
             provider_preferences=_prefs or None,
@@ -8057,8 +8401,9 @@ class AIAgent:
             omit_temperature=_omit_temp,
             supports_reasoning=self._supports_reasoning_extra_body(),
             github_reasoning_extra=self._github_models_reasoning_extra_body() if _is_gh else None,
+            lmstudio_reasoning_options=self._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
             anthropic_max_output=_ant_max,
-            extra_body_additions=_extra_body_additions,
+            provider_name=self.provider,
         )
 
     def _supports_reasoning_extra_body(self) -> bool:
@@ -8082,6 +8427,10 @@ class AIAgent:
                 return bool(github_model_reasoning_efforts(self.model))
             except Exception:
                 return False
+        if (self.provider or "").strip().lower() == "lmstudio":
+            opts = self._lmstudio_reasoning_options_cached()
+            # "off-only" (or absent) means no real reasoning capability.
+            return any(opt and opt != "off" for opt in opts)
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:
@@ -8095,8 +8444,56 @@ class AIAgent:
             "x-ai/",
             "google/gemini-2",
             "qwen/qwen3",
+            "tencent/hy3-preview",
         )
         return any(model.startswith(prefix) for prefix in reasoning_model_prefixes)
+
+    def _lmstudio_reasoning_options_cached(self) -> list[str]:
+        """Probe LM Studio's published reasoning ``allowed_options`` once per
+        (model, base_url). The list (e.g. ``["off","on"]`` or
+        ``["off","minimal","low"]``) is needed both for the supports-reasoning
+        gate and for clamping the emitted ``reasoning_effort`` so toggle-style
+        models don't 400 on ``high``. Cache is keyed on (model, base_url) so
+        ``/model`` swaps and base-URL changes don't reuse a stale list.
+        Non-empty results are cached permanently (model capabilities don't
+        change). Empty results (transient probe failure OR genuinely
+        non-reasoning model) are cached with a 60-second TTL to avoid an
+        HTTP round-trip on every turn while still retrying reasonably soon.
+        """
+        import time as _time
+
+        cache = getattr(self, "_lm_reasoning_opts_cache", None)
+        if cache is None:
+            cache = self._lm_reasoning_opts_cache = {}
+        key = (self.model, self.base_url)
+        cached = cache.get(key)
+        if cached is not None:
+            opts, ts = cached
+            # Non-empty → permanent. Empty → 60s TTL.
+            if opts or (_time.monotonic() - ts) < 60:
+                return opts
+        try:
+            from hermes_cli.models import lmstudio_model_reasoning_options
+            opts = lmstudio_model_reasoning_options(
+                self.model, self.base_url, getattr(self, "api_key", ""),
+            )
+        except Exception:
+            opts = []
+        cache[key] = (opts, _time.monotonic())
+        return opts
+
+    def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
+        """Resolve a safe top-level ``reasoning_effort`` for LM Studio.
+
+        The iteration-limit summary path calls ``chat.completions.create()``
+        directly, bypassing the transport. Share the helper so the two paths
+        can't drift on effort resolution and clamping.
+        """
+        from agent.lmstudio_reasoning import resolve_lmstudio_effort
+        return resolve_lmstudio_effort(
+            self.reasoning_config,
+            self._lmstudio_reasoning_options_cached(),
+        )
 
     def _github_models_reasoning_extra_body(self) -> dict | None:
         """Format reasoning payload for GitHub Models/OpenAI-compatible routes."""
@@ -8129,43 +8526,6 @@ class AIAgent:
                 requested_effort = supported_efforts[0]
 
         return {"effort": requested_effort}
-
-    def _cloudcode_thinking_extra_body(self) -> dict | None:
-        """Translate Hermes reasoning_config into Gemini Cloud Code thinkingConfig.
-
-        The Cloud Code / Antigravity adapters already understand
-        ``extra_body["thinking_config"]`` and normalize it into
-        ``generationConfig.thinkingConfig``. Hermes' main request builder just
-        wasn't supplying that field. Keep the mapping conservative:
-
-        - only Gemini-family Cloud Code routes receive it
-        - ``none`` becomes ``thinkingBudget=0``
-        - minimal/low -> thinkingLevel=low
-        - medium/high/xhigh -> thinkingLevel=high
-        - Antigravity's fixed ``*-high`` / ``*-low`` model IDs already encode a
-          tier, so only explicit disable is forwarded for those variants.
-        """
-        if self.provider not in {"google-gemini-cli", "google-antigravity"}:
-            return None
-        model_lower = str(self.model or "").strip().lower()
-        if not model_lower.startswith("gemini-"):
-            return None
-        if not isinstance(self.reasoning_config, dict) or not self.reasoning_config:
-            return None
-
-        enabled = self.reasoning_config.get("enabled", True)
-        if enabled is False:
-            return {"thinkingBudget": 0}
-
-        if self.provider == "google-antigravity" and model_lower.endswith(("-high", "-low")):
-            return None
-
-        effort = str(self.reasoning_config.get("effort", "medium") or "medium").strip().lower()
-        thinking_level = "low" if effort in {"minimal", "low"} else "high"
-        return {
-            "thinkingLevel": thinking_level,
-            "includeThoughts": True,
-        }
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Build a normalized assistant message dict from an API response message.
@@ -8699,6 +9059,23 @@ class AIAgent:
                 )
         except Exception as _ce_err:
             logger.debug("context engine on_session_start (compression): %s", _ce_err)
+
+        # Notify memory providers of the compression-driven session_id rotation
+        # so provider-cached per-session state (Hindsight's _document_id,
+        # accumulated turn buffers, counters) refreshes. reset=False because
+        # the logical conversation continues; only the id and DB row rolled
+        # over. See #6672.
+        try:
+            _old_sid = locals().get("old_session_id")
+            if _old_sid and self._memory_manager:
+                self._memory_manager.on_session_switch(
+                    self.session_id or "",
+                    parent_session_id=_old_sid,
+                    reset=False,
+                    reason="compression",
+                )
+        except Exception as _me_err:
+            logger.debug("memory manager on_session_switch (compression): %s", _me_err)
 
         # Warn on repeated compressions (quality degrades with each pass)
         _cc = self.context_compressor.compression_count
@@ -9638,6 +10015,10 @@ class AIAgent:
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
 
+            # Same safety net as the main loop: drop thinking-only assistant
+            # turns so Anthropic-family providers don't 400 the summary call.
+            api_messages = self._drop_thinking_only_and_merge_users(api_messages)
+
             summary_extra_body = {}
             try:
                 from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
@@ -9652,7 +10033,19 @@ class AIAgent:
             _omit_summary_temperature = _raw_summary_temp is _OMIT_TEMP
             _summary_temperature = None if _omit_summary_temperature else _raw_summary_temp
             _is_nous = "nousresearch" in self._base_url_lower
-            if self._supports_reasoning_extra_body():
+            # LM Studio uses top-level `reasoning_effort` (not extra_body.reasoning).
+            # Mirror ChatCompletionsTransport.build_kwargs() so the summary path
+            # — which calls chat.completions.create() directly without going
+            # through the transport — sends the same shape the transport does.
+            _is_lmstudio_summary = (
+                (self.provider or "").strip().lower() == "lmstudio"
+                and self._supports_reasoning_extra_body()
+            )
+            _lm_reasoning_effort: str | None = (
+                self._resolve_lmstudio_summary_reasoning_effort()
+                if _is_lmstudio_summary else None
+            )
+            if not _is_lmstudio_summary and self._supports_reasoning_extra_body():
                 if self.reasoning_config is not None:
                     summary_extra_body["reasoning"] = self.reasoning_config
                 else:
@@ -9679,6 +10072,8 @@ class AIAgent:
                     summary_kwargs["temperature"] = _summary_temperature
                 if self.max_tokens is not None:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                if _lm_reasoning_effort is not None:
+                    summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
 
                 # Include provider routing preferences
                 provider_preferences = {}
@@ -9744,6 +10139,8 @@ class AIAgent:
                         summary_kwargs["temperature"] = _summary_temperature
                     if self.max_tokens is not None:
                         summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                    if _lm_reasoning_effort is not None:
+                        summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
                     if summary_extra_body:
                         summary_kwargs["extra_body"] = summary_extra_body
 
@@ -10348,6 +10745,16 @@ class AIAgent:
             # manual message manipulation are always caught.
             api_messages = self._sanitize_api_messages(api_messages)
 
+            # Drop thinking-only assistant turns (reasoning but no visible
+            # output and no tool_calls) and merge any adjacent user messages
+            # left behind. Prevents Anthropic 400s ("The final block in an
+            # assistant message cannot be `thinking`.") and equivalent errors
+            # from third-party Anthropic-compatible gateways that can't replay
+            # a thinking-only turn. Runs on the per-call copy only — the
+            # stored conversation history keeps the reasoning block for the
+            # UI transcript and session persistence.
+            api_messages = self._drop_thinking_only_and_merge_users(api_messages)
+
             # Normalize message whitespace and tool-call JSON for consistent
             # prefix matching.  Ensures bit-perfect prefixes across turns,
             # which enables KV cache reuse on local inference servers
@@ -10430,6 +10837,7 @@ class AIAgent:
             copilot_auth_retry_attempted=False
             thinking_sig_retry_attempted = False
             image_shrink_retry_attempted = False
+            oauth_1m_beta_retry_attempted = False
             has_retried_429 = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
@@ -11022,16 +11430,10 @@ class AIAgent:
                             api_mode=self.api_mode,
                         )
                         prompt_tokens = canonical_usage.prompt_tokens
-                        display_prompt_tokens = _context_display_prompt_tokens(
-                            provider=self.provider,
-                            messages=messages,
-                            tools=self.tools,
-                            provider_prompt_tokens=prompt_tokens,
-                        )
                         completion_tokens = canonical_usage.output_tokens
                         total_tokens = canonical_usage.total_tokens
                         usage_dict = {
-                            "prompt_tokens": display_prompt_tokens,
+                            "prompt_tokens": prompt_tokens,
                             "completion_tokens": completion_tokens,
                             "total_tokens": total_tokens,
                         }
@@ -11387,6 +11789,36 @@ class AIAgent:
                                 "image-shrink recovery: no data-URL image parts found "
                                 "or shrink didn't reduce size; surfacing original error."
                             )
+
+                    # Anthropic OAuth subscription rejected the 1M-context beta
+                    # header ("long context beta is not yet available for this
+                    # subscription"). Disable the beta for the rest of this
+                    # session, rebuild the client, and retry once.  1M-capable
+                    # subscriptions never hit this branch — they accept the
+                    # beta and keep full 1M context.  See PR #17680 for the
+                    # original report (we chose reactive recovery over the
+                    # proposed unconditional omit so capable subscriptions
+                    # don't silently lose the capability).
+                    if (
+                        classified.reason == FailoverReason.oauth_long_context_beta_forbidden
+                        and self.api_mode == "anthropic_messages"
+                        and self._is_anthropic_oauth
+                        and not oauth_1m_beta_retry_attempted
+                    ):
+                        oauth_1m_beta_retry_attempted = True
+                        if not getattr(self, "_oauth_1m_beta_disabled", False):
+                            self._oauth_1m_beta_disabled = True
+                            try:
+                                self._anthropic_client.close()
+                            except Exception:
+                                pass
+                            self._rebuild_anthropic_client()
+                            self._vprint(
+                                f"{self.log_prefix}🔕 OAuth subscription doesn't support "
+                                f"the 1M-context beta — disabled for this session and retrying...",
+                                force=True,
+                            )
+                            continue
 
                     if (
                         self.api_mode == "codex_responses"
@@ -13445,4 +13877,5 @@ def main(
 
 
 if __name__ == "__main__":
+    import fire
     fire.Fire(main)

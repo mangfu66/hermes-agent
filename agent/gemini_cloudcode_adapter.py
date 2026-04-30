@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 import uuid
 from types import SimpleNamespace
@@ -45,7 +44,6 @@ from agent.gemini_schema import (
 )
 from agent.google_code_assist import (
     CODE_ASSIST_ENDPOINT,
-    FREE_TIER_ID,
     CodeAssistError,
     ProjectContext,
     resolve_project_context,
