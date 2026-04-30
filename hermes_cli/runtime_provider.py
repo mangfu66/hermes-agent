@@ -22,6 +22,7 @@ from hermes_cli.auth import (
     resolve_nous_runtime_credentials,
     resolve_codex_runtime_credentials,
     resolve_qwen_runtime_credentials,
+    resolve_minimax_oauth_runtime_credentials,
     resolve_gemini_oauth_runtime_credentials,
     resolve_antigravity_oauth_runtime_credentials,
     resolve_gemini_cli_process_credentials,
@@ -393,7 +394,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
                     }
-                    api_mode = _parse_api_mode(entry.get("api_mode"))
+                    api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                     if api_mode:
                         result["api_mode"] = api_mode
                     return result
@@ -411,7 +412,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                             "api_key": resolved_api_key,
                             "model": entry.get("default_model", ""),
                         }
-                        api_mode = _parse_api_mode(entry.get("api_mode"))
+                        api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
                         return result
@@ -1071,6 +1072,23 @@ def resolve_runtime_provider(
                 raise
             logger.info("Qwen OAuth credentials failed; "
                         "falling through to next provider.")
+
+    if provider == "minimax-oauth":
+        try:
+            creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
+            return {
+                "provider": "minimax-oauth",
+                "api_mode": "anthropic_messages",
+                "base_url": creds.get("base_url", "").rstrip("/"),
+                "api_key": creds.get("api_key", ""),
+                "source": creds.get("source", "minimax-oauth"),
+                "expires_at_ms": creds.get("expires_at_ms"),
+                "requested_provider": requested_provider,
+            }
+        except AuthError:
+            if requested_provider != "auto":
+                raise
+            logger.info("MiniMax OAuth credentials failed; falling through to next provider.")
 
     if provider == "google-gemini-acp":
         creds = resolve_gemini_cli_process_credentials()

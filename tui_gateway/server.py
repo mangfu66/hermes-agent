@@ -778,9 +778,26 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
             or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip().lower()
             or "auto"
         )
+        detect_provider = current_provider
         if current_provider == "auto":
-            current_provider = "anthropic"
-        detected = detect_static_provider_for_model(explicit_model, current_provider)
+            # In TUI startup, bare Claude aliases such as "sonnet" should
+            # resolve through the native Anthropic catalog, not whichever
+            # secondary OAuth/channel catalog also happens to expose Claude
+            # model names.  Still call once with "auto" first so tests and
+            # future exact aliases can observe the raw startup state.
+            detected = detect_static_provider_for_model(explicit_model, current_provider)
+            if (
+                detected
+                and detected[0] in {"google-antigravity", "google-gemini-cli", "google-gemini-acp"}
+                and "/" not in explicit_model
+            ):
+                anthropic_detected = detect_static_provider_for_model(explicit_model, "anthropic")
+                if anthropic_detected:
+                    detected = anthropic_detected
+            if not detected:
+                detected = detect_static_provider_for_model(explicit_model, "anthropic")
+        else:
+            detected = detect_static_provider_for_model(explicit_model, detect_provider)
         if detected:
             provider, detected_model = detected
             return detected_model, provider
@@ -1148,6 +1165,45 @@ def _compress_session_history(
         session["history_version"] = history_version + 1
     usage = _get_usage(agent)
     return len(history) - len(compressed), usage
+
+
+def _maybe_auto_compress_history(session: dict, focus_topic: str | None = None) -> int:
+    """Compress TUI session history before a turn when it is clearly large.
+
+    This is intentionally conservative: tiny histories never pay the
+    compression cost, and the existing _compress_session_history helper keeps
+    the history_version guard so concurrent mutations are not clobbered.
+    """
+    try:
+        history = list(session.get("history", []))
+        if len(history) < 4:
+            return 0
+        agent = session.get("agent")
+        compressor = getattr(agent, "context_compressor", None)
+        threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
+        if threshold <= 0:
+            return 0
+        from agent.model_metadata import estimate_messages_tokens_rough
+
+        approx_tokens = estimate_messages_tokens_rough(history)
+        if approx_tokens < threshold:
+            return 0
+        try:
+            removed, _usage = _compress_session_history(
+                session,
+                focus_topic=focus_topic,
+                approx_tokens=approx_tokens,
+                before_messages=history,
+                history_version=int(session.get("history_version", 0)),
+            )
+        except TypeError:
+            # Keep compatibility with tests and lightweight monkeypatches that
+            # model the older two-argument helper signature.
+            removed, _usage = _compress_session_history(session, focus_topic=focus_topic)
+        return int(removed or 0)
+    except Exception as exc:
+        print(f"[tui_gateway] auto-compress before submit failed: {exc}", file=sys.stderr)
+        return 0
 
 
 def _sync_session_key_after_compress(sid: str, session: dict) -> None:
@@ -2747,12 +2803,13 @@ def _(rid, params: dict) -> dict:
 
 
 def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+    agent = session["agent"]
+    _maybe_auto_compress_history(session, str(text) if isinstance(text, str) else None)
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
-    agent = session["agent"]
     _emit("message.start", sid)
 
     def run():
