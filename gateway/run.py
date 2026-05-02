@@ -6586,16 +6586,23 @@ class GatewayRunner:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
 
-    def _format_session_info(self) -> str:
+    def _format_session_info(
+        self,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+    ) -> str:
         """Resolve current model config and return a formatted info block.
 
         Surfaces model, provider, context length, and endpoint so gateway
         users can immediately see if context detection went wrong (e.g.
-        local models falling to the 128K default).
+        local models falling to the 128K default). When called for a concrete
+        session, honor session-scoped /model overrides before global config.
         """
         from agent.model_metadata import get_model_context_length, DEFAULT_FALLBACK_CONTEXT
 
+        data = None
         model = _resolve_gateway_model()
+        config_model = model
         config_context_length = None
         provider = None
         base_url = None
@@ -6605,6 +6612,8 @@ class GatewayRunner:
         try:
             data = _load_gateway_config()
             if data:
+                config_model = _resolve_gateway_model(data)
+                model = config_model
                 model_cfg = data.get("model", {})
                 if isinstance(model_cfg, dict):
                     raw_ctx = model_cfg.get("context_length")
@@ -6623,14 +6632,31 @@ class GatewayRunner:
         except Exception:
             pass
 
-        # Resolve runtime credentials for probing
+        # Resolve runtime credentials for probing, applying per-session /model
+        # overrides when a session identity is available.
         try:
-            runtime = _resolve_runtime_agent_kwargs()
-            provider = provider or runtime.get("provider")
-            base_url = base_url or runtime.get("base_url")
+            model, runtime = self._resolve_session_agent_runtime(
+                source=source,
+                session_key=session_key,
+                user_config=data,
+            )
+            provider = runtime.get("provider") or provider
+            base_url = runtime.get("base_url") or base_url
             api_key = runtime.get("api_key")
         except Exception:
-            pass
+            try:
+                runtime = _resolve_runtime_agent_kwargs()
+                provider = runtime.get("provider") or provider
+                base_url = runtime.get("base_url") or base_url
+                api_key = runtime.get("api_key")
+            except Exception:
+                pass
+
+        if model != config_model:
+            # A global model.context_length applies to the configured default
+            # model only. Session overrides should use catalog/custom-provider
+            # metadata instead of inheriting the default model's context.
+            config_context_length = None
 
         context_length = get_model_context_length(
             model,

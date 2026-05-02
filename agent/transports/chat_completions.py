@@ -90,6 +90,28 @@ def _snake_case_gemini_thinking_config(config: dict | None) -> dict | None:
     return translated or None
 
 
+def _build_antigravity_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
+    """Translate Hermes reasoning config for Antigravity's fixed-tier models.
+
+    Antigravity exposes some Gemini models as explicit tiered IDs such as
+    ``gemini-3.1-pro-high`` / ``gemini-3.1-pro-low``. Sending a redundant
+    ``thinkingLevel`` for those can be rejected, while disabling reasoning is
+    represented by a zero budget rather than ``includeThoughts: false``.
+    """
+    if reasoning_config is None or not isinstance(reasoning_config, dict):
+        return None
+
+    effort = str(reasoning_config.get("effort", "medium") or "medium").strip().lower()
+    if reasoning_config.get("enabled") is False or effort == "none":
+        return {"thinkingBudget": 0}
+
+    normalized_model = (model or "").strip().lower()
+    if normalized_model.endswith(("-high", "-low")):
+        return None
+
+    return _build_gemini_thinking_config(model, reasoning_config)
+
+
 def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     normalized = str(base_url or "").strip().rstrip("/").lower()
     if not normalized:
@@ -403,8 +425,12 @@ class ChatCompletionsTransport(ProviderTransport):
                     extra_body["extra_body"] = openai_compat_extra
             elif raw_thinking_config:
                 extra_body["thinking_config"] = raw_thinking_config
-        elif provider_name in {"google-gemini-cli", "google-antigravity"}:
+        elif provider_name == "google-gemini-cli":
             thinking_config = _build_gemini_thinking_config(model, reasoning_config)
+            if thinking_config:
+                extra_body["thinking_config"] = thinking_config
+        elif provider_name == "google-antigravity":
+            thinking_config = _build_antigravity_thinking_config(model, reasoning_config)
             if thinking_config:
                 extra_body["thinking_config"] = thinking_config
 

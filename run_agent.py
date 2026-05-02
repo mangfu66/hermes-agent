@@ -177,6 +177,31 @@ from utils import atomic_json_write, base_url_host_matches, base_url_hostname, e
 from hermes_cli.config import cfg_get
 
 
+_GOOGLE_CODE_ASSIST_CONTEXT_PROVIDERS = {
+    "google-gemini-cli",
+    "google-gemini-acp",
+    "google-antigravity",
+}
+
+
+def _context_display_prompt_tokens(
+    *,
+    provider: str,
+    messages: list,
+    tools: list | None,
+    provider_prompt_tokens: int,
+) -> int:
+    """Prompt-token figure to expose in status/compression state.
+
+    Google Code Assist channels report promptTokenCount with semantics that do
+    not track the full current request size the same way other providers do.
+    For status-bar/context pressure we want a stable estimate of the request we
+    actually sent, including tool schemas.
+    """
+    if (provider or "").strip().lower() in _GOOGLE_CODE_ASSIST_CONTEXT_PROVIDERS:
+        return estimate_request_tokens_rough(messages or [], tools=tools or [])
+    return max(0, int(provider_prompt_tokens or 0))
+
 
 class _SafeWriter:
     """Transparent stdio wrapper that catches OSError/ValueError from broken pipes.
@@ -11655,10 +11680,16 @@ class AIAgent:
                             api_mode=self.api_mode,
                         )
                         prompt_tokens = canonical_usage.prompt_tokens
+                        display_prompt_tokens = _context_display_prompt_tokens(
+                            provider=self.provider,
+                            messages=messages,
+                            tools=self.tools,
+                            provider_prompt_tokens=prompt_tokens,
+                        )
                         completion_tokens = canonical_usage.output_tokens
                         total_tokens = canonical_usage.total_tokens
                         usage_dict = {
-                            "prompt_tokens": prompt_tokens,
+                            "prompt_tokens": display_prompt_tokens,
                             "completion_tokens": completion_tokens,
                             "total_tokens": total_tokens,
                         }

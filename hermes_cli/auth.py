@@ -1674,7 +1674,10 @@ def resolve_gemini_cli_process_credentials() -> Dict[str, Any]:
         "provider": "google-gemini-cli",
         "api_key": "gemini-cli-acp",
         "base_url": base_url.rstrip("/"),
-        "command": resolved_command or command,
+        # Use the configured command string instead of resolving it to an
+        # absolute path. The process launcher can resolve PATH itself, and
+        # keeping "gemini" stable avoids session/runtime diffs between hosts.
+        "command": command,
         "args": args,
         "source": "process",
     }

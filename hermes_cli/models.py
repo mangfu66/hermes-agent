@@ -1573,6 +1573,14 @@ def _resolve_static_model_alias(
         if matched := _match(provider):
             return provider, matched
 
+    # Prefer the direct vendor provider for short aliases before broad catalog
+    # order. Local overlay catalogs such as google-antigravity also expose
+    # Claude/Gemini names, but typing `/model sonnet` should stay on the
+    # canonical Anthropic route instead of being captured by an IDE gateway.
+    if vendor in _PROVIDER_MODELS and vendor not in current_keys:
+        if matched := _match(vendor):
+            return vendor, matched
+
     for provider in _PROVIDER_MODELS:
         if provider in current_keys or provider in _AGGREGATOR_PROVIDERS:
             continue
