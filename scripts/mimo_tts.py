@@ -33,13 +33,14 @@ def build_payload(text: str, voice: str, model: str, fmt: str, style: str | None
     if style:
         messages.append({"role": "user", "content": style})
     messages.append({"role": "assistant", "content": text})
+    audio = {"format": fmt}
+    voice = (voice or "").strip()
+    if voice:
+        audio["voice"] = voice
     return {
         "model": model,
         "messages": messages,
-        "audio": {
-            "format": fmt,
-            "voice": voice,
-        },
+        "audio": audio,
     }
 
 
