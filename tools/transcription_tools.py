@@ -154,7 +154,7 @@ def _find_whisper_binary() -> Optional[str]:
 
 
 def _get_local_command_template() -> Optional[str]:
-    configured = os.getenv(LOCAL_STT_COMMAND_ENV, "").strip()
+    configured = get_env_value(LOCAL_STT_COMMAND_ENV, "").strip()
     if configured:
         return configured
 
@@ -484,7 +484,7 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
     # Language: config.yaml (stt.local.language) > env var > "en" default.
     language = (
         _load_stt_config().get("local", {}).get("language")
-        or os.getenv(LOCAL_STT_LANGUAGE_ENV)
+        or get_env_value(LOCAL_STT_LANGUAGE_ENV)
         or DEFAULT_LOCAL_STT_LANGUAGE
     )
     normalized_model = _normalize_local_command_model(model_name)
