@@ -53,9 +53,9 @@ def main() -> int:
     parser.add_argument("--base-url", default=os.getenv("MIMO_TTS_BASE_URL", DEFAULT_BASE_URL))
     args = parser.parse_args()
 
-    api_key = get_secret("MIMO_API_KEY")
+    api_key = get_secret("MIMO_TOKEN_PLAN_API_KEY")
     if not api_key:
-        print("MIMO_API_KEY is not set", file=sys.stderr)
+        print("MIMO_TOKEN_PLAN_API_KEY is not set", file=sys.stderr)
         return 2
 
     input_path = Path(args.input).expanduser()

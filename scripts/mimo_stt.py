@@ -99,9 +99,9 @@ def local_fallback(file_path: str, language: str) -> str:
 
 
 def transcribe_via_mimo(file_path: Path, prompt: str, model: str, base_url: str) -> str:
-    api_key = get_secret("MIMO_API_KEY")
+    api_key = get_secret("MIMO_TOKEN_PLAN_API_KEY")
     if not api_key:
-        raise RuntimeError("MIMO_API_KEY is not set")
+        raise RuntimeError("MIMO_TOKEN_PLAN_API_KEY is not set")
 
     audio_bytes = file_path.read_bytes()
     mime = guess_mime(file_path)
