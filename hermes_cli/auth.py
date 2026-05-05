@@ -1124,8 +1124,9 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
                 antigravity_oauth_path.unlink()
                 cleared = True
 
-        if not cleared:
-            return False
+        # Logout must also clear a stale active_provider pointer even when the
+        # provider credential payload was already removed. This can happen after
+        # manual auth-store cleanup or cross-version migrations.
         if auth_store.get("active_provider") == target:
             auth_store["active_provider"] = None
             cleared = True
