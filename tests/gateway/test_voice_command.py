@@ -2649,6 +2649,28 @@ class TestVoiceTTSPlayback:
         ]}]
         assert self._call_should_reply(runner, "all", MessageType.TEXT, agent_msgs=agent_msgs) is False
 
+    def test_old_session_tts_tool_does_not_suppress_new_turn(self):
+        """Only current-turn tool calls should dedup auto-TTS, not stale history."""
+        from gateway.platforms.base import MessageType
+        runner = self._make_runner()
+        stale_history = [
+            {"role": "assistant", "tool_calls": [
+                {"id": "1", "type": "function", "function": {"name": "text_to_speech", "arguments": "{}"}}
+            ]},
+            {"role": "user", "content": "old user"},
+            {"role": "assistant", "content": "old reply"},
+        ]
+        current_turn = [
+            {"role": "user", "content": "new user"},
+            {"role": "assistant", "content": "new reply"},
+        ]
+        assert self._call_should_reply(
+            runner,
+            "all",
+            MessageType.TEXT,
+            agent_msgs=stale_history + current_turn,
+        ) is True
+
     # -- Streaming ON (already_sent=True) --
 
     def test_streaming_on_voice_input_runner_fires(self):

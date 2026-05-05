@@ -6436,6 +6436,7 @@ class GatewayRunner:
             # Use the filtered history length (history_offset) that was actually
             # passed to the agent, not len(history) which includes session_meta
             # entries that were stripped before the agent saw them.
+            current_turn_messages = []
             if is_context_overflow_failure:
                 pass  # handled above — skip all transcript writes
             elif agent_failed_early:
@@ -6450,6 +6451,7 @@ class GatewayRunner:
             else:
                 history_len = agent_result.get("history_offset", len(history))
                 new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
+                current_turn_messages = new_messages
 
                 # If no new messages found (edge case), fall back to simple user/assistant
                 if not new_messages:
@@ -6489,7 +6491,12 @@ class GatewayRunner:
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
+            if self._should_send_voice_reply(
+                event,
+                response,
+                current_turn_messages,
+                already_sent=_already_sent,
+            ):
                 await self._send_voice_reply(event, response)
 
             # If streaming already delivered the response, extract and
@@ -8270,14 +8277,22 @@ class GatewayRunner:
         if not should:
             return False
 
-        # Dedup: agent already called TTS tool
+        # Dedup only against the current turn. Older session history may contain
+        # prior manual TTS tool calls, and those must not permanently suppress
+        # auto-TTS for later replies in the same chat.
+        dedup_window = agent_messages or []
+        for idx in range(len(dedup_window) - 1, -1, -1):
+            if dedup_window[idx].get("role") == "user":
+                dedup_window = dedup_window[idx + 1:]
+                break
+
         has_agent_tts = any(
             msg.get("role") == "assistant"
             and any(
                 tc.get("function", {}).get("name") == "text_to_speech"
                 for tc in (msg.get("tool_calls") or [])
             )
-            for msg in agent_messages
+            for msg in dedup_window
         )
         if has_agent_tts:
             return False
