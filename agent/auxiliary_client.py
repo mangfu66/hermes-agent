@@ -594,7 +594,12 @@ class _CodexCompletionsAdapter:
                     # API allows it.
                     pass
                 else:
-                    effort = reasoning_cfg.get("effort", "medium")
+                    # Truthy-only check mirrors agent/transports/codex.py
+                    # build_kwargs(): falsy values (None, "", 0) fall back
+                    # to the default rather than being forwarded to the
+                    # Codex backend, which rejects e.g. {"effort": null}
+                    # with a 400.
+                    effort = reasoning_cfg.get("effort") or "medium"
                     # Codex backend rejects "minimal"; clamp to "low" to
                     # match the main-agent Codex transport behavior.
                     if effort == "minimal":
@@ -1560,7 +1565,7 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
     return CodexAuxiliaryClient(real_client, model), model
 
 
-def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
+def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optional[str]]:
     try:
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
     except ImportError:
@@ -1570,10 +1575,10 @@ def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
     if pool_present:
         if entry is None:
             return None, None
-        token = _pool_runtime_api_key(entry)
+        token = explicit_api_key or _pool_runtime_api_key(entry)
     else:
         entry = None
-        token = resolve_anthropic_token()
+        token = explicit_api_key or resolve_anthropic_token()
     if not token:
         return None, None
 
@@ -2379,7 +2384,7 @@ def resolve_provider_client(
 
     if pconfig.auth_type == "api_key":
         if provider == "anthropic":
-            client, default_model = _try_anthropic()
+            client, default_model = _try_anthropic(explicit_api_key=explicit_api_key)
             if client is None:
                 logger.warning("resolve_provider_client: anthropic requested but no Anthropic credentials found")
                 return None, None
@@ -2724,8 +2729,11 @@ def resolve_vision_provider_client(
         return resolved_provider, sync_client, final_model
 
     if resolved_base_url:
+        provider_for_base_override = (
+            requested if requested and requested not in ("", "auto") else "custom"
+        )
         client, final_model = resolve_provider_client(
-            "custom",
+            provider_for_base_override,
             model=resolved_model,
             async_mode=async_mode,
             explicit_base_url=resolved_base_url,
@@ -2733,8 +2741,8 @@ def resolve_vision_provider_client(
             api_mode=resolved_api_mode,
         )
         if client is None:
-            return "custom", None, None
-        return "custom", client, final_model
+            return provider_for_base_override, None, None
+        return provider_for_base_override, client, final_model
 
     if requested == "auto":
         # Vision auto-detection order:
@@ -3200,8 +3208,14 @@ def _resolve_task_provider_model(
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
-        if cfg_base_url:
+        if cfg_base_url and cfg_api_key:
+            # Both base_url and api_key explicitly set → custom endpoint.
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
+        if cfg_base_url and cfg_provider and cfg_provider != "auto":
+            # base_url set without api_key but with a known provider — use
+            # the provider so it can resolve credentials from env vars
+            # (e.g. OPENROUTER_API_KEY) instead of locking into "custom".
+            return cfg_provider, resolved_model, cfg_base_url, None, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
             return cfg_provider, resolved_model, None, None, resolved_api_mode
 
