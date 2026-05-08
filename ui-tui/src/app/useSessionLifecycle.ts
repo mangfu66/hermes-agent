@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs'
 
 import type { ScrollBoxHandle } from '@hermes/ink'
 import { evictInkCaches } from '@hermes/ink'
-import { type RefObject, useCallback } from 'react'
+import { useCallback, type RefObject } from 'react'
 
 import { capHistory } from '../config/limits.js'
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
@@ -13,6 +13,7 @@ import type {
   SessionCloseResponse,
   SessionCreateResponse,
   SessionResumeResponse,
+  SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
@@ -123,7 +124,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   )
 
   const newSession = useCallback(
-    async (msg?: string) => {
+    async (msg?: string, title?: string) => {
       const setup = await rpc<SetupStatusResponse>('setup.status', {})
 
       if (setup?.provider_configured === false) {
@@ -142,6 +143,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       }
 
       const info = r.info ?? null
+      const requestedTitle = title?.trim() ?? ''
 
       resetSession()
       setSessionStartedAt(Date.now())
@@ -168,6 +170,30 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       if (msg) {
         sys(msg)
+      }
+
+      if (requestedTitle) {
+        rpc<SessionTitleResponse>('session.title', {
+          session_id: r.session_id,
+          title: requestedTitle
+        })
+          .then(result => {
+            if (!result || getUiState().sid !== r.session_id) {
+              return
+            }
+
+            const nextTitle = (result.title ?? requestedTitle).trim()
+            const suffix = result.pending ? ' (queued while session initializes)' : ''
+            sys(`session title set: ${nextTitle}${suffix}`)
+          })
+          .catch((err: unknown) => {
+            if (getUiState().sid !== r.session_id) {
+              return
+            }
+
+            const message = err instanceof Error ? err.message : String(err)
+            sys(`warning: failed to set session title: ${message}`)
+          })
       }
     },
     [closeSession, colsRef, panel, resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]

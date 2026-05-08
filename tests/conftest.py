@@ -482,23 +482,42 @@ def _ensure_current_event_loop(request):
     Python 3.11+/3.12 emits a DeprecationWarning when plain synchronous code
     calls ``get_event_loop()`` without one being set. A number of gateway/TUI
     tests still use ``asyncio.get_event_loop().run_until_complete(...)``.
-    Create and install a fresh loop for non-asyncio tests up front so those
-    call sites stay warning-free and deterministic, while leaving
-    pytest-asyncio-managed tests alone.
+    Ensure they always have a usable loop without interfering with pytest-asyncio's
+    own loop management for @pytest.mark.asyncio tests.
+
+    On Python 3.12+, ``asyncio.get_event_loop_policy().get_event_loop()`` with no
+    *running* loop emits DeprecationWarning; skip that path and install a fresh
+    loop via ``new_event_loop()`` instead.
     """
     if request.node.get_closest_marker("asyncio") is not None:
         yield
         return
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+
+    if loop is None and sys.version_info < (3, 12):
+        try:
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+        except RuntimeError:
+            loop = None
+
+    created = loop is None or loop.is_closed()
+    if created:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     try:
         yield
     finally:
-        try:
-            loop.close()
-        finally:
-            asyncio.set_event_loop(None)
+        if created and loop is not None:
+            try:
+                loop.close()
+            finally:
+                asyncio.set_event_loop(None)
 
 
 @pytest.fixture(autouse=True)
