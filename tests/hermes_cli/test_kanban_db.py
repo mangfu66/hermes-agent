@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -45,6 +46,131 @@ def test_init_creates_expected_tables(kanban_home):
         ).fetchall()
     names = {r["name"] for r in rows}
     assert {"tasks", "task_links", "task_comments", "task_events"} <= names
+
+
+def test_init_db_migrates_legacy_failure_columns(tmp_path):
+    db = tmp_path / "legacy-kanban.db"
+    conn = sqlite3.connect(str(db), isolation_level=None, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            assignee TEXT,
+            tenant TEXT,
+            idempotency_key TEXT,
+            claim_lock TEXT,
+            claim_expires INTEGER,
+            started_at INTEGER,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            spawn_failures INTEGER NOT NULL DEFAULT 0,
+            last_spawn_error TEXT
+        );
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            run_id INTEGER,
+            created_at INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, spawn_failures, last_spawn_error) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("t_legacy", "legacy", "todo", "alice", 4, "boom"),
+    )
+    conn.close()
+
+    kb.init_db(db)
+
+    with kb.connect(db) as conn2:
+        cols = {row["name"] for row in conn2.execute("PRAGMA table_info(tasks)")}
+        row = conn2.execute(
+            "SELECT consecutive_failures, last_failure_error FROM tasks WHERE id = ?",
+            ("t_legacy",),
+        ).fetchone()
+
+    assert "consecutive_failures" in cols
+    assert "last_failure_error" in cols
+    assert row["consecutive_failures"] == 4
+    assert row["last_failure_error"] == "boom"
+
+
+def test_migrate_optional_columns_tolerates_duplicate_column_race(tmp_path):
+    db = tmp_path / "legacy-race.db"
+    conn = sqlite3.connect(str(db), isolation_level=None, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            assignee TEXT,
+            tenant TEXT,
+            idempotency_key TEXT,
+            claim_lock TEXT,
+            claim_expires INTEGER,
+            started_at INTEGER,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            spawn_failures INTEGER NOT NULL DEFAULT 0,
+            last_spawn_error TEXT
+        );
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            run_id INTEGER,
+            created_at INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, assignee, spawn_failures, last_spawn_error) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("t_race", "race", "todo", "alice", 7, "kaboom"),
+    )
+
+    class _DuplicateColumnProxy:
+        def __init__(self, inner):
+            self._inner = inner
+            self._triggered = False
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(str(sql).split())
+            target = (
+                "ALTER TABLE tasks ADD COLUMN consecutive_failures "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+            if not self._triggered and normalized == target:
+                self._triggered = True
+                self._inner.execute(sql, params)
+                raise sqlite3.OperationalError(
+                    "duplicate column name: consecutive_failures"
+                )
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    kb._migrate_add_optional_columns(_DuplicateColumnProxy(conn))
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    row = conn.execute(
+        "SELECT consecutive_failures, last_failure_error FROM tasks WHERE id = ?",
+        ("t_race",),
+    ).fetchone()
+    conn.close()
+
+    assert "consecutive_failures" in cols
+    assert "last_failure_error" in cols
+    assert row["consecutive_failures"] == 7
+    assert row["last_failure_error"] == "kaboom"
 
 
 # ---------------------------------------------------------------------------
