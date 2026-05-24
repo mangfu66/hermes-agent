@@ -48,6 +48,106 @@ def test_init_creates_expected_tables(kanban_home):
     assert {"tasks", "task_links", "task_comments", "task_events"} <= names
 
 
+def test_connect_rejects_tls_record_in_sqlite_header(tmp_path, monkeypatch):
+    """Kanban should classify TLS-looking page-0 clobbers before WAL setup."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    corrupt = home / "kanban.db"
+    corrupt.write_bytes(b"SQLit" + bytes.fromhex("17 03 03 00 13") + b"x" * 32)
+
+    with pytest.raises(sqlite3.DatabaseError) as exc_info:
+        kb.connect(board="default")
+
+    msg = str(exc_info.value)
+    assert "file is not a database" in msg
+    assert "TLS record header detected at byte offset 5" in msg
+    assert "53 51 4c 69 74 17 03 03 00 13" in msg
+
+def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
+    """Legacy DBs missing additive indexed columns must migrate cleanly.
+
+    SCHEMA_SQL runs in ``connect()`` before ``_migrate_add_optional_columns``.
+    Indexes over additive columns therefore must be created after the
+    migration adds those columns, or boards predating the column fail to
+    open before migration can run.
+
+    Covers all four indexes that sit on additive columns:
+    - ``tasks.session_id``       -> ``idx_tasks_session_id``    (#28447)
+    - ``tasks.tenant``           -> ``idx_tasks_tenant``        (#16081)
+    - ``tasks.idempotency_key``  -> ``idx_tasks_idempotency``   (#17805)
+    - ``task_events.run_id``     -> ``idx_events_run``          (#17805)
+    """
+    db_path = tmp_path / "legacy-kanban.db"
+    conn = sqlite3.connect(str(db_path))
+    # Pre-#16081 ``tasks`` shape: missing tenant, idempotency_key, session_id.
+    conn.execute("""
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT,
+            assignee TEXT,
+            status TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+            workspace_path TEXT,
+            claim_lock TEXT,
+            claim_expires INTEGER
+        )
+    """)
+    # Pre-#17805 ``task_events`` shape: missing run_id. Required because
+    # ``_migrate_add_optional_columns`` unconditionally runs PRAGMA on
+    # ``task_events`` for run_id back-fill.
+    conn.execute("""
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, created_at) "
+        "VALUES ('legacy', 'old board task', 'ready', 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    with kb.connect(db_path) as migrated:
+        task_columns = {
+            row["name"] for row in migrated.execute("PRAGMA table_info(tasks)")
+        }
+        event_columns = {
+            row["name"]
+            for row in migrated.execute("PRAGMA table_info(task_events)")
+        }
+        indexes = {
+            row["name"]
+            for row in migrated.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+
+    # Additive columns added by migration:
+    assert "session_id" in task_columns
+    assert "tenant" in task_columns
+    assert "idempotency_key" in task_columns
+    assert "run_id" in event_columns
+    # And their indexes — the regression scope of this test:
+    assert "idx_tasks_session_id" in indexes
+    assert "idx_tasks_tenant" in indexes
+    assert "idx_tasks_idempotency" in indexes
+    assert "idx_events_run" in indexes
+
 def test_init_db_migrates_legacy_failure_columns(tmp_path):
     db = tmp_path / "legacy-kanban.db"
     conn = sqlite3.connect(str(db), isolation_level=None, timeout=30)
@@ -98,7 +198,6 @@ def test_init_db_migrates_legacy_failure_columns(tmp_path):
     assert "last_failure_error" in cols
     assert row["consecutive_failures"] == 4
     assert row["last_failure_error"] == "boom"
-
 
 def test_migrate_optional_columns_tolerates_duplicate_column_race(tmp_path):
     db = tmp_path / "legacy-race.db"
@@ -319,7 +418,8 @@ def test_stale_claim_reclaimed(kanban_home, monkeypatch):
         reclaimed = kb.release_stale_claims(conn, signal_fn=_signal)
         assert reclaimed == 1
         assert kb.get_task(conn, t).status == "ready"
-        assert killed == [signal.SIGTERM]
+        # Dead worker PIDs no longer need a best-effort SIGTERM first.
+        assert killed == []
 
 
 def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
@@ -1563,24 +1663,25 @@ def _make_task(**overrides) -> "kb.Task":
 
 def test_safe_int_accepts_int_and_int_string():
     """Sanity: well-typed values pass through."""
-    assert kb._safe_int(0) == 0
-    assert kb._safe_int(1700000000) == 1700000000
-    assert kb._safe_int("1700000000") == 1700000000
+    # PR d8ad431de renamed _safe_int → _to_epoch (now also handles ISO-8601).
+    assert kb._to_epoch(0) == 0
+    assert kb._to_epoch(1700000000) == 1700000000
+    assert kb._to_epoch("1700000000") == 1700000000
 
 
 def test_safe_int_returns_none_on_corrupt_inputs():
     """All the failure modes that used to crash task_age."""
     # None — common when the column was never written
-    assert kb._safe_int(None) is None
+    assert kb._to_epoch(None) is None
     # Unsubstituted format string — the literal case the PR title cites
-    assert kb._safe_int("%s") is None
+    assert kb._to_epoch("%s") is None
     # Arbitrary non-numeric strings
-    assert kb._safe_int("abc") is None
-    assert kb._safe_int("") is None
+    assert kb._to_epoch("abc") is None
+    assert kb._to_epoch("") is None
     # Float-ish strings: int("1.5") raises ValueError too — caller wants None.
-    assert kb._safe_int("1.5") is None
+    assert kb._to_epoch("1.5") is None
     # Random object — covered by TypeError branch
-    assert kb._safe_int(object()) is None
+    assert kb._to_epoch(object()) is None
 
 
 def test_task_age_handles_corrupt_created_at():
